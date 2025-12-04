@@ -257,6 +257,14 @@ class CArchive:
                 tmp: PureWindowsPath = pathlib.PureWindowsPath(entry.name)
             else:
                 tmp: Path = Path(entry.name)
+            # Make path relative to prevent writing to absolute paths outside output_dir
+            # This handles cases where entry.name is an absolute path like "/configuration" or "\configuration"
+            # For Windows paths, we need to check both is_absolute() and if it starts with a path separator
+            # because PureWindowsPath('\foo') on non-Windows is not absolute but still causes issues when joined
+            entry_name_str = str(tmp)
+            if tmp.is_absolute() or entry_name_str.startswith('/') or entry_name_str.startswith('\\'):
+                # Strip leading path separators
+                tmp = Path(entry_name_str.lstrip("/\\"))
             file_path = pathlib.Path(self.output_dir).joinpath(tmp)
             if len(file_path.parents) > 1:  # every path has '.' as a parent
                 file_path.parent.mkdir(parents=True, exist_ok=True)

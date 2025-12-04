@@ -20,7 +20,10 @@ import asn1crypto
 import pefile
 import signify
 from asn1crypto import pem
-from signify.authenticode import AuthenticodeSignedData
+try:
+    from signify.authenticode import AuthenticodeSignedData
+except ImportError:
+    from signify.authenticode import AuthenticodeSignature as AuthenticodeSignedData
 
 import pydecipher
 from pydecipher import logger, utils
@@ -217,19 +220,19 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             authenticode_structure: signify.authenticode.AuthenticodeSignedData = AuthenticodeSignedData.from_envelope(
                 cert
             )
-            cert_obj: signify.certificates.Certificate
             for cert_obj in authenticode_structure.certificates:
-                cert_name_obj: asn1crypto.x509.Name = cert_obj.to_asn1crypto.subject
+                # Map short field names to the full asn1crypto names for compatibility
+                # New signify API uses short names like "OU", "O", "CN"
                 preferred_name_fields: List[str] = [
-                    "organizational_unit_name",
-                    "organization_name",
-                    "common_name",
+                    "OU",   # organizational_unit_name
+                    "O",    # organization_name
+                    "CN",   # common_name
                 ]
                 name_selected: bool = False
                 preferred_field_name: str
                 for preferred_field_name in preferred_name_fields:
                     name_tuple: Tuple[str, str]
-                    for name_tuple in cert_name_obj.native.items():
+                    for name_tuple in cert_obj.subject.get_components():
                         field: str = name_tuple[0]
                         value: str = name_tuple[1]
                         if field == preferred_field_name:
@@ -245,7 +248,7 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                 logger.debug(f"[+] Extracting Authenticode certificate {cert_name}.")
                 f: BinaryIO
                 with certificate_extraction_dir.joinpath(cert_name).open("wb") as f:
-                    der_bytes: bytes = cert_obj.to_asn1crypto.dump()
+                    der_bytes: bytes = cert_obj.to_der
                     pem_bytes: bytes = pem.armor("CERTIFICATE", der_bytes)
                     f.write(pem_bytes)
         self.certificates_dumped = True
