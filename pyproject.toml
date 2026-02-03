@@ -1,3 +1,79 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pydecipher"
+version = "1.0.0"
+description = "Python un-freezing and bytecode extraction + analysis framework"
+readme = "README.rst"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "The MITRE Corporation", email = "pydecipher@mitre.org"}
+]
+requires-python = ">=3.8"
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Security",
+    "Topic :: Software Development :: Code Generators",
+    "Topic :: Software Development :: Disassemblers",
+]
+dependencies = [
+    "xdis>=6.0.0",
+    "python-magic",
+    "pefile",
+    "decompyle3>=3.9.0",
+    "asn1crypto",
+    "pycryptodome",
+    "textdistance",
+    "pebble",
+]
+
+
+[project.optional-dependencies]
+dev = [
+    "sphinx",
+    "sphinx_rtd_theme",
+    "towncrier",
+    "pytest",
+    "bump2version",
+    "black",
+    "pre-commit",
+    "flake8",
+    "flake8-docstrings",
+    "restructuredtext-lint",
+]
+docs = [
+    "sphinx",
+    "sphinx_rtd_theme",
+    "towncrier",
+]
+test = [
+    "pytest",
+]
+
+[project.scripts]
+pydecipher = "pydecipher.main:run"
+melt = "pydecipher.main:run"
+remap = "pydecipher.remap:run"
+
+[project.urls]
+Homepage = "https://github.com/mitre/pydecipher"
+
+[tool.setuptools.packages.find]
+include = ["pydecipher*"]
+
 [tool.towncrier]
 package = "pydecipher"
 directory = "./docs/changes"
@@ -6,7 +82,7 @@ filename = "./docs/changelog.rst"
 [tool.black]
 line-length = 120
 verbose = true
-target-version = ['py38']
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312', 'py313']
 exclude = '''
 /(
     pydecipher/reference_files/source_code

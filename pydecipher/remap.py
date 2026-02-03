@@ -149,7 +149,7 @@ def write_remapping_file(
 
     xdis_opcode: ModuleType = None
     try:
-        xdis_opcode = xdis.disasm.get_opcode(version, is_pypy=False)
+        xdis_opcode = xdis.disasm.get_opcode(bytecode.version_str_to_tuple(version), is_pypy=False)
     except Exception:
         logger.debug(f"[!] Couldn't retrieve version {version} from xdis! Continuing anyway...")
 
@@ -285,8 +285,8 @@ def fill_opmap_gaps(remappings: Dict[int, int], version: str) -> Dict[int, Tuple
     filled_remappings: Dict[int, Tuple[int, bool]] = {k: (v, False) for k, v in remappings.items()}
     is_pypy: bool = True if "pypy" in version else False
     try:
-        opcode_obj: ModuleType = xdis.disasm.get_opcode(version, is_pypy)
-    except KeyError:
+        opcode_obj: ModuleType = xdis.disasm.get_opcode(bytecode.version_str_to_tuple(version), is_pypy)
+    except (KeyError, TypeError):
         raise KeyError(f"[!] The version specified, {version}, is not supported by xdis.")
     xdis_opcode_map: Dict[str, int] = opcode_obj.opmap
     xdis_opcode_vals: Set[int] = set(xdis_opcode_map.values())
@@ -427,7 +427,7 @@ def opcode_constants_remap(
     def get_nearest_opcode(opname: str, unused_opcodes: List[int], version: str) -> int:
         xdis_opcode: ModuleType
         try:
-            xdis_opcode = xdis.disasm.get_opcode(version, is_pypy=False)
+            xdis_opcode = xdis.disasm.get_opcode(bytecode.version_str_to_tuple(version), is_pypy=False)
             actual_opcode = getattr(xdis_opcode, opname)
         except Exception:
             return unused_opcodes[0]
@@ -522,7 +522,7 @@ def opcode_constants_remap(
             break
 
     is_pypy: bool = "pypy" in xdis.magics.magicint2version[magic_int]
-    opc: ModuleType = xdis.disasm.get_opcode(version, is_pypy)
+    opc: ModuleType = xdis.disasm.get_opcode(bytecode.version_str_to_tuple(version), is_pypy)
     remappings: Dict[int, Dict[int, int]] = {}
 
     # We need to match the format of the other remappings method's return values

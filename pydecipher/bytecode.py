@@ -4,7 +4,7 @@
 Attributes
 ----------
 REMAPPED_OPCODE_ERROR_REGEX : re.Pattern
-    A regex pattern that matches the uncompyle6 error typically seen when trying
+    A regex pattern that matches the decompyle3 error typically seen when trying
     to decompile Python bytecode that has had its opcodes remapped.
 """
 import io
@@ -21,7 +21,7 @@ from types import CodeType, ModuleType
 from typing import Any, Dict, Iterable, List, TextIO, Tuple, Union
 
 import pebble
-import uncompyle6
+import decompyle3
 import xdis
 from xdis import iscode
 from xdis.magics import magicint2version
@@ -29,8 +29,32 @@ from xdis.magics import magicint2version
 import pydecipher
 from pydecipher import logger
 
+
+def version_str_to_tuple(version: str) -> tuple:
+    """Convert a version string like '3.6' or '3.10.1' to a tuple like (3, 6).
+
+    xdis 6.x requires version tuples instead of version strings for get_opcode().
+
+    Parameters
+    ----------
+    version : str
+        A version string like '3.6', '3.10', '2.7', or '3.6pypy'
+
+    Returns
+    -------
+    tuple
+        A version tuple like (3, 6) or (3, 10)
+    """
+    # Remove pypy suffix if present
+    clean_version = version.replace("pypy", "").strip()
+    # Split on dots and convert to integers
+    parts = clean_version.split(".")
+    # Only use major.minor (first two parts)
+    return tuple(int(p) for p in parts[:2])
+
 __all__ = [
     "REMAPPED_OPCODE_ERROR_REGEX",
+    "version_str_to_tuple",
     "version_str_to_magic_num_int",
     "create_pyc_header",
     "process_pycs",
@@ -110,7 +134,7 @@ def create_pyc_header(magic_int: int, compilation_ts: Union[int, datetime] = Non
 def process_pycs(pyc_iterable: Iterable[os.PathLike], alternate_opmap: Dict[str, int] = None) -> None:
     """Multi-processed decompilation orchestration of compiled Python files.
 
-    Currently, pydecipher uses `uncompyle6`_ as its decompiler. It works well
+    Currently, pydecipher uses `decompyle3`_ as its decompiler. It works well
     with `xdis`_ (same author) and allows for the decompilation of Code objects
     using alternate opmaps (with our extension of xdis).
 
@@ -118,7 +142,7 @@ def process_pycs(pyc_iterable: Iterable[os.PathLike], alternate_opmap: Dict[str,
     the given Python. Attempts to check for debugger, in which case the
     decompilation will be single-threaded to make debugging easier.
 
-    .. _uncompyle6: https://github.com/rocky/python-uncompyle6/
+    .. _decompyle3: https://github.com/rocky/python-decompile3/
     .. _xdis: https://github.com/rocky/python-xdis
 
     Parameters
@@ -230,7 +254,7 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
             * **no_action**: This file was not decompiled.
             * **success**: This file was successfully decompiled.
             * **error**: This file could not be decompiled 100% successfully.
-            * **opcode_error**: The error message returned by uncompyle6
+            * **opcode_error**: The error message returned by decompyle3
               indicates this file may have remapped opcodes
     """
     pyc_file: pathlib.Path = arg_tuple[0]
@@ -260,8 +284,8 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
         logger.debug(f"[*] Decompiling file {pyc_file} of size {pyc_file.stat().st_size}")
         if not alternate_opmap:
             try:
-                uncompyle6.decompile_file(str(pyc_file), outstream=sys.stdout)
-            except uncompyle6.semantics.parser_error.ParserError as e:
+                decompyle3.decompile_file(str(pyc_file), outstream=sys.stdout)
+            except decompyle3.semantics.parser_error.ParserError as e:
                 logger.warning(f"[!] Failed to decompile file {pyc_file}")
                 if REMAPPED_OPCODE_ERROR_REGEX.match(str(e.error)):
                     logger.error(
@@ -307,7 +331,7 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
                 )
                 output_file: TextIO
                 with new_file_name.open(mode="w") as output_file:
-                    uncompyle6.main.decompile(
+                    decompyle3.main.decompile(
                         version,
                         co,
                         timestamp=timestamp,
@@ -394,7 +418,7 @@ def diff_opcode(code_standard: CodeType, code_remapped: CodeType, version: str =
     HAVE_ARGUMENT: int = 90
     if version:
         try:
-            xdis_opcode: ModuleType = xdis.disasm.get_opcode(version, is_pypy=("pypy" in version))
+            xdis_opcode: ModuleType = xdis.disasm.get_opcode(version_str_to_tuple(version), is_pypy=("pypy" in version))
         except TypeError:
             logger.warning("[!] Couldn't retrieve version {version}'s opcodes from xdis.")
         else:
@@ -509,8 +533,8 @@ def validate_opmap(version: str, opmap: Dict[str, int]) -> bool:
     """
     is_pypy: bool = True if "pypy" in version else False
     try:
-        opcode_obj: ModuleType = xdis.disasm.get_opcode(version, is_pypy)
-    except KeyError:
+        opcode_obj: ModuleType = xdis.disasm.get_opcode(version_str_to_tuple(version), is_pypy)
+    except (KeyError, TypeError):
         raise KeyError(f"[!] The version specified, {version}, is not supported by xdis.")
     xdis_opcode_map: Dict[str, int] = opcode_obj.opmap
     validity: bool = True

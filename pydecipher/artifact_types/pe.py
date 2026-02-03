@@ -16,14 +16,8 @@ import re
 import pathlib
 from typing import Any, BinaryIO, Dict, List, Tuple, Union
 
-import asn1crypto
 import pefile
-import signify
-from asn1crypto import pem
-try:
-    from signify.authenticode import AuthenticodeSignedData
-except ImportError:
-    from signify.authenticode import AuthenticodeSignature as AuthenticodeSignedData
+from asn1crypto import cms, pem, x509
 
 import pydecipher
 from pydecipher import logger, utils
@@ -216,39 +210,43 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             cert: bytes = certificate_table_data[8 : 8 + cert_length]
             certificate_table_data: bytes = certificate_table_data[8 + cert_length :]
 
-            # Extract all the X509 certificates from the PKCS#7 structure
-            authenticode_structure: signify.authenticode.AuthenticodeSignedData = AuthenticodeSignedData.from_envelope(
-                cert
-            )
-            for cert_obj in authenticode_structure.certificates:
-                # Map short field names to the full asn1crypto names for compatibility
-                # New signify API uses short names like "OU", "O", "CN"
+            # Extract all the X509 certificates from the PKCS#7 structure using asn1crypto
+            try:
+                content_info = cms.ContentInfo.load(cert)
+                if content_info["content_type"].native != "signed_data":
+                    continue
+                signed_data = content_info["content"]
+                certificates = signed_data["certificates"]
+            except Exception as e:
+                logger.debug(f"[!] Failed to parse PKCS#7 structure: {e}")
+                continue
+
+            for cert_choice in certificates:
+                if cert_choice.name != "certificate":
+                    continue
+                cert_obj: x509.Certificate = cert_choice.chosen
+                subject = cert_obj.subject
+
+                # Get a human-readable name for the certificate file
                 preferred_name_fields: List[str] = [
-                    "OU",   # organizational_unit_name
-                    "O",    # organization_name
-                    "CN",   # common_name
+                    "organizational_unit_name",
+                    "organization_name",
+                    "common_name",
                 ]
-                name_selected: bool = False
-                preferred_field_name: str
-                for preferred_field_name in preferred_name_fields:
-                    name_tuple: Tuple[str, str]
-                    for name_tuple in cert_obj.subject.get_components():
-                        field: str = name_tuple[0]
-                        value: str = name_tuple[1]
-                        if field == preferred_field_name:
-                            name_selected = True
-                            cert_name: str = value
-                            break
-                    if name_selected:
+                cert_name: str = None
+                for field_name in preferred_name_fields:
+                    value = subject.native.get(field_name)
+                    if value:
+                        cert_name = value if isinstance(value, str) else value[0]
                         break
-                if not name_selected:
-                    cert_name: str = f"{len(os.listdir(certificate_extraction_dir))}"
-                cert_name: str = utils.slugify(cert_name, allow_unicode=True) + ".pem"
+                if not cert_name:
+                    cert_name = f"{len(os.listdir(certificate_extraction_dir))}"
+                cert_name = utils.slugify(cert_name, allow_unicode=True) + ".pem"
 
                 logger.debug(f"[+] Extracting Authenticode certificate {cert_name}.")
                 f: BinaryIO
                 with certificate_extraction_dir.joinpath(cert_name).open("wb") as f:
-                    der_bytes: bytes = cert_obj.to_der
+                    der_bytes: bytes = cert_obj.dump()
                     pem_bytes: bytes = pem.armor("CERTIFICATE", der_bytes)
                     f.write(pem_bytes)
         self.certificates_dumped = True
