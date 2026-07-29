@@ -179,7 +179,6 @@ def test_pyz_budget_accounts_for_generated_header(tmp_path, monkeypatch) -> None
     assert not (archive.output_dir / "empty.pyc").exists()
 
 
-@_known_vulnerability("021: truncated encrypted PYZ IV crashes extraction")
 def test_truncated_encrypted_pyz_member_is_skipped(tmp_path, monkeypatch) -> None:
     """A short encrypted member is handled as a per-member parse failure."""
     archive = ZlibArchive.__new__(ZlibArchive)

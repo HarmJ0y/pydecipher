@@ -653,6 +653,9 @@ class ZlibArchive:
 
     def decrypt_file(self, data) -> Union[bytes, None]:
         CRYPT_BLOCK_SIZE = 16
+        if len(data) < CRYPT_BLOCK_SIZE:
+            logger.debug("[!] Encrypted PYZ member is shorter than its initialization vector.")
+            return None
         initialization_vector = data[:CRYPT_BLOCK_SIZE]
 
         if not self.encryption_key:
@@ -665,7 +668,7 @@ class ZlibArchive:
                         decrypted_data,
                         utils.get_extraction_budget(getattr(self, "kwargs", {})),
                     )  # ensures the password is correct
-                except (zlib.error, utils.ExtractionLimitError) as e:
+                except (ValueError, zlib.error, utils.ExtractionLimitError) as e:
                     logger.debug(f"[!] Decryption of .pyc failed with password {encryption_key}. Discarding key.")
                 else:
                     self.encryption_key = encryption_key
@@ -675,7 +678,7 @@ class ZlibArchive:
             try:
                 cipher: AES.AESCipher = AES.new(self.encryption_key.encode(), AES.MODE_CFB, initialization_vector)
                 return cipher.decrypt(data[CRYPT_BLOCK_SIZE:])
-            except zlib.error as e:
+            except (ValueError, zlib.error) as e:
                 logger.error(f"[!] Failed to decrypt .pyc with error: {e}")
                 return None
 
