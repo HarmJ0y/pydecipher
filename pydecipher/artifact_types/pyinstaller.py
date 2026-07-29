@@ -388,9 +388,7 @@ class CArchive:
                     continue
 
             if entry.type_code != self.ArchiveItem.RUNTIME_OPTION:
-                self.output_dir.mkdir(parents=True, exist_ok=True)
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-                with file_path.open(mode="wb") as f:
+                with utils.open_output_file(self.output_dir, entry.name, suffix=file_suffix) as (file_path, f):
                     f.write(data)
                     successfully_extracted += 1
 
@@ -683,8 +681,7 @@ class ZlibArchive:
                 logger.debug(f"[!] PYZ zlib decompression failed with error: {e}")
             else:
                 extraction_budget.commit_payload(compressed_data_size, len(uncompressed_data))
-                self.output_dir.mkdir(parents=True, exist_ok=True)
-                with pyc_file.open("wb") as pyc_file_ptr:
+                with utils.open_output_file(self.output_dir, key, suffix=".pyc") as (pyc_file, pyc_file_ptr):
                     pyc_file_ptr.write(header_bytes + uncompressed_data)
                 successfully_extracted += 1
 

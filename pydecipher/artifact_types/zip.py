@@ -141,36 +141,26 @@ class ZipFile:
                             continue
 
                         if member.is_dir():
-                            output_path.mkdir(parents=True, exist_ok=True)
+                            try:
+                                utils.make_output_directory(self.output_dir, member.filename)
+                            except (OSError, ValueError) as error:
+                                logger.warning(
+                                    f"[!] Could not safely extract ZIP directory {member.filename!r}: {error}."
+                                )
+                                continue
                             extraction_budget.commit_payload(member.compress_size, 0)
                             continue
 
-                        output_path.parent.mkdir(parents=True, exist_ok=True)
                         try:
-                            # Check containment again after creating parent
-                            # directories, immediately before opening the file.
-                            output_path = utils.safe_output_path(self.output_dir, member.filename)
-                        except ValueError as error:
-                            logger.warning(f"[!] Skipping unsafe ZIP member {member.filename!r}: {error}.")
-                            continue
-
-                        open_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-                        if hasattr(os, "O_NOFOLLOW"):
-                            open_flags |= os.O_NOFOLLOW
-                        try:
-                            output_fd = os.open(output_path, open_flags, 0o666)
-                        except OSError as error:
-                            logger.warning(f"[!] Could not safely extract ZIP member {member.filename!r}: {error}.")
-                            continue
-                        extracted_size = 0
-                        try:
-                            with os.fdopen(output_fd, "wb") as destination, archive.open(member) as source:
+                            extracted_size = 0
+                            with utils.open_output_file(
+                                self.output_dir, member.filename
+                            ) as (output_path, destination), archive.open(member) as source:
                                 while chunk := source.read(1024 * 1024):
                                     extracted_size += len(chunk)
                                     extraction_budget.validate_payload(member.compress_size, extracted_size)
                                     destination.write(chunk)
-                        except utils.ExtractionLimitError as error:
-                            output_path.unlink(missing_ok=True)
+                        except (OSError, ValueError, utils.ExtractionLimitError) as error:
                             logger.warning(f"[!] Skipping ZIP member {member.filename!r}: {error}.")
                             continue
                         extraction_budget.commit_payload(member.compress_size, extracted_size)

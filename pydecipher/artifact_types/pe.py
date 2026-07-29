@@ -137,15 +137,12 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                     logger.warning(f"[!] Skipping PE resource {resource_name!r}: {error}.")
                     return
 
-                self.output_dir.mkdir(parents=True, exist_ok=True)
                 try:
-                    resource_dump = utils.safe_output_path(self.output_dir, resource_name)
-                except ValueError as error:
+                    with utils.open_output_file(self.output_dir, resource_name) as (resource_dump, outfile_ptr):
+                        outfile_ptr.write(resource_data)
+                except (OSError, ValueError) as error:
                     logger.warning(f"[!] Skipping unsafe PE resource {resource_name!r}: {error}.")
                     return
-                outfile_ptr: BinaryIO
-                with resource_dump.open("wb") as outfile_ptr:
-                    outfile_ptr.write(resource_data)
                 extraction_budget.commit_payload(size, len(resource_data))
                 logger.info(f"[+] Successfully dumped PE resource {resource_name} to disk at {self.output_dir}")
                 return resource_dump
@@ -268,8 +265,7 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                 except utils.ExtractionLimitError as error:
                     logger.warning(f"[!] Skipping Authenticode certificate {cert_name!r}: {error}.")
                     continue
-                f: BinaryIO
-                with certificate_extraction_dir.joinpath(cert_name).open("wb") as f:
+                with utils.open_output_file(certificate_extraction_dir, cert_name) as (_, f):
                     f.write(pem_bytes)
                 extraction_budget.commit_payload(len(der_bytes), len(pem_bytes))
         self.certificates_dumped = True
@@ -315,10 +311,7 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             except utils.ExtractionLimitError as error:
                 logger.warning(f"[!] Skipping PE overlay: {error}.")
                 return
-            overlay_path: pathlib.Path = self.output_dir.joinpath("overlay_data")
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            overlay_file_ptr: BinaryIO
-            with overlay_path.open("wb") as overlay_file_ptr:
+            with utils.open_output_file(self.output_dir, "overlay_data") as (overlay_path, overlay_file_ptr):
                 overlay_file_ptr.write(self.overlay)
             extraction_budget.commit_payload(len(self.overlay), len(self.overlay))
             logger.info(f"[+] Dumped this PE's overlay data to {overlay_path.relative_to(self.output_dir.parent)}")

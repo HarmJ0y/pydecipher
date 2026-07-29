@@ -5,7 +5,10 @@ import pathlib
 import re
 import string
 import sys
+import tempfile
 import unicodedata
+import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Generator, List, Set, Tuple
 
@@ -18,6 +21,8 @@ __all__ = [
     "ExtractionLimitError",
     "get_extraction_budget",
     "next_recursion_kwargs",
+    "open_output_file",
+    "make_output_directory",
     "slugify",
     "safe_output_path",
     "parse_for_strings",
@@ -116,14 +121,8 @@ def next_recursion_kwargs(kwargs) -> dict:
     return nested_kwargs
 
 
-def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> pathlib.Path:
-    """Build an untrusted member path that remains inside ``output_dir``.
-
-    Archive and resource names may contain POSIX or Windows separators
-    regardless of the current platform. Absolute paths, drive-qualified paths,
-    parent traversal, null bytes, and destinations redirected by existing
-    symlinks are rejected.
-    """
+def _safe_output_parts(member_name: str, suffix: str = "") -> List[str]:
+    """Normalize an untrusted member name into safe relative components."""
     if not isinstance(member_name, str) or not member_name:
         raise ValueError("member name must be a non-empty string")
     if "\x00" in member_name:
@@ -143,6 +142,18 @@ def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = ""
     if not path_parts:
         raise ValueError("member name does not identify a file")
     path_parts[-1] += suffix
+    return path_parts
+
+
+def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> pathlib.Path:
+    """Build an untrusted member path that remains inside ``output_dir``.
+
+    Archive and resource names may contain POSIX or Windows separators
+    regardless of the current platform. Absolute paths, drive-qualified paths,
+    parent traversal, null bytes, and destinations redirected by existing
+    symlinks are rejected.
+    """
+    path_parts = _safe_output_parts(member_name, suffix=suffix)
 
     output_root = pathlib.Path(output_dir)
     output_root_resolved = output_root.resolve(strict=False)
@@ -153,6 +164,98 @@ def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = ""
         raise ValueError("member path escapes the output directory") from error
 
     return output_path
+
+
+def _supports_secure_output_dir_fd() -> bool:
+    """Return whether this platform supports descriptor-relative safe writes."""
+    return (
+        hasattr(os, "O_DIRECTORY")
+        and hasattr(os, "O_NOFOLLOW")
+        and all(function in os.supports_dir_fd for function in (os.open, os.mkdir, os.rename, os.unlink))
+    )
+
+
+def _open_directory_chain(output_dir: pathlib.Path, path_parts: List[str]) -> List[int]:
+    """Open or create a directory chain without following symlinks."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    absolute_output_dir = pathlib.Path(os.path.abspath(output_dir))
+    descriptors = [os.open(absolute_output_dir.anchor, directory_flags)]
+    try:
+        for part in [*absolute_output_dir.parts[1:], *path_parts]:
+            try:
+                os.mkdir(part, dir_fd=descriptors[-1])
+            except FileExistsError:
+                pass
+            descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
+    except Exception:
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+        raise
+    return descriptors
+
+
+def make_output_directory(output_dir: os.PathLike, member_name: str) -> pathlib.Path:
+    """Safely create an archive member directory below ``output_dir``."""
+    output_path = safe_output_path(output_dir, member_name)
+    path_parts = _safe_output_parts(member_name)
+    if _supports_secure_output_dir_fd():
+        descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+    else:
+        output_path.mkdir(parents=True, exist_ok=True)
+        safe_output_path(output_dir, member_name)
+    return output_path
+
+
+@contextmanager
+def open_output_file(output_dir: os.PathLike, member_name: str, suffix: str = ""):
+    """Atomically open a contained output file without following symlinks.
+
+    On platforms with descriptor-relative filesystem operations, every parent
+    component is opened with ``O_NOFOLLOW`` and the completed temporary file is
+    renamed relative to the already-open parent directory. Other platforms use
+    the same containment checks with an atomic temporary-file replacement.
+    """
+    output_path = safe_output_path(output_dir, member_name, suffix=suffix)
+    path_parts = _safe_output_parts(member_name, suffix=suffix)
+
+    if _supports_secure_output_dir_fd():
+        descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts[:-1])
+        parent_fd = descriptors[-1]
+        temporary_name = f".{path_parts[-1]}.{uuid.uuid4().hex}.tmp"
+        open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        temporary_fd = None
+        try:
+            temporary_fd = os.open(temporary_name, open_flags, 0o666, dir_fd=parent_fd)
+            with os.fdopen(temporary_fd, "wb") as output_file:
+                temporary_fd = None
+                yield output_path, output_file
+            os.rename(temporary_name, path_parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        except Exception:
+            if temporary_fd is not None:
+                os.close(temporary_fd)
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            raise
+        finally:
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
+        return
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path = safe_output_path(output_dir, member_name, suffix=suffix)
+    temporary_file = tempfile.NamedTemporaryFile(dir=output_path.parent, delete=False)
+    temporary_path = pathlib.Path(temporary_file.name)
+    try:
+        with temporary_file:
+            yield output_path, temporary_file
+        os.replace(temporary_path, output_path)
+    except Exception:
+        temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def slugify(value: str, allow_unicode: bool = False) -> str:
