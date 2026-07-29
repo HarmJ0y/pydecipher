@@ -560,7 +560,6 @@ class ZlibArchive:
             logger.warning(f"[!] Refusing symlinked ZlibArchive encryption key file {key_file}.")
             return
         if key_file.is_file():
-            self.encrypted = True
             logger.debug(f"[+] Found ZlibArchive encryption key file at path {key_file}")
             crypto_key_filename: str  # full path of
             try:
@@ -657,10 +656,11 @@ class ZlibArchive:
             logger.debug("[!] Encrypted PYZ member is shorter than its initialization vector.")
             return None
         initialization_vector = data[:CRYPT_BLOCK_SIZE]
+        potential_keys = self.__dict__.get("potential_keys", [])
 
         if not self.encryption_key:
-            while self.potential_keys:
-                encryption_key = self.potential_keys.pop()
+            while potential_keys:
+                encryption_key = potential_keys.pop()
                 try:
                     cipher: AES.AESCipher = AES.new(encryption_key.encode(), AES.MODE_CFB, initialization_vector)
                     decrypted_data = cipher.decrypt(data[CRYPT_BLOCK_SIZE:])  # will silently fail if password is wrong
@@ -712,6 +712,11 @@ class ZlibArchive:
             compressed_data = self.archive_contents[position : position + compressed_data_size]
             if self.encrypted:
                 compressed_data = self.decrypt_file(compressed_data)
+            elif self.__dict__.get("potential_keys"):
+                decrypted_data = self.decrypt_file(compressed_data)
+                if decrypted_data is not None:
+                    self.encrypted = True
+                    compressed_data = decrypted_data
             if compressed_data is None:
                 # decrypt_file returns None on failure
                 decompression_errors += 1

@@ -197,7 +197,6 @@ def test_truncated_encrypted_pyz_member_is_skipped(tmp_path, monkeypatch) -> Non
     assert not (archive.output_dir / "short.pyc").exists()
 
 
-@_known_vulnerability("025: ambient decoy key file poisons unencrypted PYZ")
 def test_invalid_ambient_key_does_not_disable_unencrypted_pyz(
     tmp_path,
     monkeypatch,
