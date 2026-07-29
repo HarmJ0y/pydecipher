@@ -43,7 +43,6 @@ def _corrupt_first_member_crc(archive_bytes: bytes) -> bytes:
     return bytes(patched)
 
 
-@_known_vulnerability("011: unsupported ZIP compression aborts extraction")
 def test_unsupported_zip_member_is_skipped_and_later_member_extracts(
     tmp_path,
     monkeypatch,
