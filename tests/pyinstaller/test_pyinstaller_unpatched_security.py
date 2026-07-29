@@ -225,7 +225,6 @@ def test_invalid_ambient_key_does_not_disable_unencrypted_pyz(
     assert (archive.output_dir / "module.pyc").read_bytes() == b"payload"
 
 
-@_known_vulnerability("026: CArchive TOC order suppresses source")
 def test_carchive_source_before_module_is_extracted(tmp_path, monkeypatch) -> None:
     """Source extraction is independent of hostile TOC ordering."""
     source = xdis.marsh.TYPE_CODE.encode() + b"\0" * 7

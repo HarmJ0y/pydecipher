@@ -310,6 +310,21 @@ class CArchive:
     def extract_files(self):
         extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         magic_nums: set = set()
+        for module_entry in self.toc:
+            if module_entry.type_code != self.ArchiveItem.PYMODULE:
+                continue
+            module_data = self.archive_contents[
+                module_entry.entry_offset : module_entry.entry_offset + module_entry.compressed_data_size
+            ]
+            try:
+                if module_entry.compression_flag:
+                    magic_bytes = zlib.decompressobj().decompress(module_data, 4)
+                else:
+                    magic_bytes = module_data[:4]
+                if len(magic_bytes) == 4:
+                    magic_nums.add(magic2int(magic_bytes))
+            except (KeyError, TypeError, ValueError, zlib.error, struct.error):
+                continue
         nested_output_dirs: set = set()
         decompression_errors = 0
         successfully_extracted = 0
