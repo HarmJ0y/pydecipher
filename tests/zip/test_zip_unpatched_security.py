@@ -59,7 +59,6 @@ def test_unsupported_zip_member_is_skipped_and_later_member_extracts(
     assert (output_dir / "good").read_bytes() == b"good"
 
 
-@_known_vulnerability("028: ZIP CRC error aborts later members")
 def test_zip_crc_error_is_skipped_and_later_member_extracts(
     tmp_path,
     monkeypatch,

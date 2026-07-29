@@ -162,7 +162,13 @@ class ZipFile:
                                     extracted_size += len(chunk)
                                     extraction_budget.validate_payload(member.compress_size, extracted_size)
                                     destination.write(chunk)
-                        except (OSError, ValueError, NotImplementedError, utils.ExtractionLimitError) as error:
+                        except (
+                            OSError,
+                            ValueError,
+                            NotImplementedError,
+                            zipfile.BadZipFile,
+                            utils.ExtractionLimitError,
+                        ) as error:
                             logger.warning(f"[!] Skipping ZIP member {member.filename!r}: {error}.")
                             continue
                         extraction_budget.commit_payload(member.compress_size, extracted_size)
