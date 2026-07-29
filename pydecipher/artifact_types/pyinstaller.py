@@ -26,42 +26,8 @@ from pydecipher import utils
 
 
 def _safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> Path:
-    """Build an archive member path that is contained by ``output_dir``.
-
-    PyInstaller archives can use either POSIX or Windows path separators,
-    regardless of the platform on which they are being inspected. Treat both
-    forms as path separators and reject paths that could escape the extraction
-    directory.
-    """
-    if not isinstance(member_name, str) or not member_name:
-        raise ValueError("archive member name must be a non-empty string")
-    if "\x00" in member_name:
-        raise ValueError("archive member name contains a null byte")
-
-    posix_path = pathlib.PurePosixPath(member_name)
-    windows_path = pathlib.PureWindowsPath(member_name)
-    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive or windows_path.root:
-        raise ValueError("absolute archive member paths are not allowed")
-
-    path_parts = []
-    for part in member_name.replace("\\", "/").split("/"):
-        if part == "..":
-            raise ValueError("parent directory components are not allowed")
-        if part not in ("", "."):
-            path_parts.append(part)
-    if not path_parts:
-        raise ValueError("archive member name does not identify a file")
-    path_parts[-1] += suffix
-
-    output_root = Path(output_dir)
-    output_root_resolved = output_root.resolve(strict=False)
-    output_path = output_root.joinpath(*path_parts)
-    try:
-        output_path.resolve(strict=False).relative_to(output_root_resolved)
-    except (OSError, RuntimeError, ValueError) as error:
-        raise ValueError("archive member path escapes the output directory") from error
-
-    return output_path
+    """Compatibility wrapper around the shared safe-path helper."""
+    return utils.safe_output_path(output_dir, member_name, suffix=suffix)
 
 
 @pydecipher.register

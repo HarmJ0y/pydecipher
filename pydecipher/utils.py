@@ -14,6 +14,7 @@ from pydecipher import logger
 
 __all__ = [
     "slugify",
+    "safe_output_path",
     "parse_for_strings",
     "parse_for_version_strings",
     "rglob_limit_depth",
@@ -21,6 +22,45 @@ __all__ = [
     "check_write_access",
     "check_for_our_xdis",
 ]
+
+
+def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> pathlib.Path:
+    """Build an untrusted member path that remains inside ``output_dir``.
+
+    Archive and resource names may contain POSIX or Windows separators
+    regardless of the current platform. Absolute paths, drive-qualified paths,
+    parent traversal, null bytes, and destinations redirected by existing
+    symlinks are rejected.
+    """
+    if not isinstance(member_name, str) or not member_name:
+        raise ValueError("member name must be a non-empty string")
+    if "\x00" in member_name:
+        raise ValueError("member name contains a null byte")
+
+    posix_path = pathlib.PurePosixPath(member_name)
+    windows_path = pathlib.PureWindowsPath(member_name)
+    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive or windows_path.root:
+        raise ValueError("absolute member paths are not allowed")
+
+    path_parts = []
+    for part in member_name.replace("\\", "/").split("/"):
+        if part == "..":
+            raise ValueError("parent directory components are not allowed")
+        if part not in ("", "."):
+            path_parts.append(part)
+    if not path_parts:
+        raise ValueError("member name does not identify a file")
+    path_parts[-1] += suffix
+
+    output_root = pathlib.Path(output_dir)
+    output_root_resolved = output_root.resolve(strict=False)
+    output_path = output_root.joinpath(*path_parts)
+    try:
+        output_path.resolve(strict=False).relative_to(output_root_resolved)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("member path escapes the output directory") from error
+
+    return output_path
 
 
 def slugify(value: str, allow_unicode: bool = False) -> str:

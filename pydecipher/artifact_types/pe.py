@@ -122,12 +122,20 @@ class PortableExecutable(metaclass=abc.ABCMeta):
         """
         entry: pefile.ResourceDirEntryData
         for entry in self.pe.DIRECTORY_ENTRY_RESOURCE.entries:
-            if entry.name.string.decode() == resource_name:
+            try:
+                current_resource_name = entry.name.string.decode()
+            except UnicodeDecodeError:
+                continue
+            if current_resource_name == resource_name:
                 rva: int = entry.directory.entries[0].directory.entries[0].data.struct.OffsetToData
                 size: int = entry.directory.entries[0].directory.entries[0].data.struct.Size
 
                 self.output_dir.mkdir(parents=True, exist_ok=True)
-                resource_dump: pathlib.Path = self.output_dir / resource_name
+                try:
+                    resource_dump = utils.safe_output_path(self.output_dir, resource_name)
+                except ValueError as error:
+                    logger.warning(f"[!] Skipping unsafe PE resource {resource_name!r}: {error}.")
+                    return
                 outfile_ptr: BinaryIO
                 with resource_dump.open("wb") as outfile_ptr:
                     outfile_ptr.write(self.pe.get_data(rva, size))
@@ -323,9 +331,15 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             for entry in self.pe.DIRECTORY_ENTRY_RESOURCE.entries:
                 if entry.name is None:
                     continue
-                resource_name: str = entry.name.string.decode()
-                if any([True for pattern in self.INTERESTING_RESOURCES if re.match(pattern, resource_name, re.I)]):
+                try:
+                    resource_name: str = entry.name.string.decode()
+                except UnicodeDecodeError:
+                    logger.warning("[!] Skipping PE resource with an invalid UTF-8 name.")
+                    continue
+                if any(re.fullmatch(pattern, resource_name, re.I) for pattern in self.INTERESTING_RESOURCES):
                     resource_path: pathlib.Path = self.dump_resource(resource_name)
+                    if resource_path is None:
+                        continue
                     if resource_name == "PYTHONSCRIPT":
                         pythonscript_idx = len(unpack_me)
                     unpack_me.append(resource_path)
