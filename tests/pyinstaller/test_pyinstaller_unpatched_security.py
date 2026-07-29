@@ -37,7 +37,6 @@ class _TrackingBytesIO(io.BytesIO):
     "artifact_type",
     [PortableExecutable, CArchive, ZlibArchive, ZipFile],
 )
-@_known_vulnerability("005: unbounded artifact buffering")
 def test_artifact_size_limit_is_checked_before_whole_file_read(
     tmp_path,
     artifact_type,

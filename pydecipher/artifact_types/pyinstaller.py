@@ -123,6 +123,7 @@ class CArchive:
         output_dir: os.PathLike = None,
         **kwargs,
     ):
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(carchive_path_or_bytes, str):
             carchive_path_or_bytes: Path = Path(carchive_path_or_bytes)
         if isinstance(carchive_path_or_bytes, Path):
@@ -132,11 +133,13 @@ class CArchive:
             if not os.access(carchive_path_or_bytes, os.R_OK):
                 msg = f"[!] Lacking read permissions on: {str(carchive_path_or_bytes)}."
                 raise PermissionError(msg)
+            if carchive_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.archive_path = carchive_path_or_bytes
             with self.archive_path.open("rb") as input_file:
-                self.archive_contents = input_file.read()
+                self.archive_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(carchive_path_or_bytes, io.BufferedIOBase):
-            self.archive_contents = carchive_path_or_bytes.read()
+            self.archive_contents = utils.read_limited(carchive_path_or_bytes, max_input_size)
 
         if output_dir:
             self.output_dir = output_dir
@@ -490,6 +493,7 @@ class ZlibArchive:
         output_dir: os.PathLike = None,
         **kwargs,
     ):
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(zlibarchive_path_or_bytes, str):
             zlibarchive_path_or_bytes: Path = Path(zlibarchive_path_or_bytes)
         if isinstance(zlibarchive_path_or_bytes, Path):
@@ -499,11 +503,13 @@ class ZlibArchive:
             if not os.access(zlibarchive_path_or_bytes, os.R_OK):
                 msg = f"[!] Lacking read permissions on: {str(zlibarchive_path_or_bytes)}."
                 raise PermissionError(msg)
+            if zlibarchive_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.archive_path = zlibarchive_path_or_bytes
             with self.archive_path.open("rb") as input_file:
-                self.archive_contents = input_file.read()
+                self.archive_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(zlibarchive_path_or_bytes, io.BufferedIOBase):
-            self.archive_contents = zlibarchive_path_or_bytes.read()
+            self.archive_contents = utils.read_limited(zlibarchive_path_or_bytes, max_input_size)
 
         if output_dir:
             self.output_dir = output_dir

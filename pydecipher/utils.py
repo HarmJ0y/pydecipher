@@ -21,6 +21,7 @@ __all__ = [
     "ExtractionLimitError",
     "get_extraction_budget",
     "next_recursion_kwargs",
+    "read_limited",
     "open_existing_file",
     "open_output_file",
     "make_output_directory",
@@ -80,6 +81,25 @@ class ExtractionBudget:
         """Validate and account for a successfully processed member payload."""
         self.validate_payload(compressed_size, output_size)
         self.total_size += output_size
+
+
+def read_limited(input_file, max_size: int) -> bytes:
+    """Read at most ``max_size`` bytes and reject larger input streams."""
+    if max_size <= 0:
+        raise ValueError("maximum input size must be a positive integer")
+
+    chunks = []
+    remaining = max_size + 1
+    while remaining:
+        chunk = input_file.read(min(1024 * 1024, remaining))
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    contents = b"".join(chunks)
+    if len(contents) > max_size:
+        raise ExtractionLimitError(f"artifact exceeds {max_size} input bytes")
+    return contents
 
 
 def get_extraction_budget(kwargs) -> ExtractionBudget:

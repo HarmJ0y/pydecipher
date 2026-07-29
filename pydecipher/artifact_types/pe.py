@@ -82,15 +82,18 @@ class PortableExecutable(metaclass=abc.ABCMeta):
         output_dir: os.PathLike = None,
         **kwargs,
     ) -> None:
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(pe_path_or_bytes, str):
             pe_path_or_bytes: pathlib.Path = pathlib.Path(pe_path_or_bytes)
         if isinstance(pe_path_or_bytes, pathlib.Path):
             utils.check_read_access(pe_path_or_bytes)
+            if pe_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.file_path = pe_path_or_bytes
             with self.file_path.open("rb") as input_file:
-                self.file_contents = input_file.read()
+                self.file_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(pe_path_or_bytes, io.BufferedIOBase):
-            self.file_contents = pe_path_or_bytes.read()
+            self.file_contents = utils.read_limited(pe_path_or_bytes, max_input_size)
 
         try:
             self.pe = pefile.PE(data=self.file_contents)

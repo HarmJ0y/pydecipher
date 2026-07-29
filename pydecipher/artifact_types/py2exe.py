@@ -47,6 +47,7 @@ class PYTHONSCRIPT:
         output_dir: os.PathLike = None,
         **kwargs,
     ):
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(pythonscript_path_or_bytes, str):
             pythonscript_path_or_bytes: Path = Path(pythonscript_path_or_bytes)
             # TODO try a path resolve here and fail if not working
@@ -57,11 +58,13 @@ class PYTHONSCRIPT:
             if not os.access(pythonscript_path_or_bytes, os.R_OK):
                 msg = f"[!] Lacking read permissions on: {str(pythonscript_path_or_bytes)}."
                 raise PermissionError(msg)
+            if pythonscript_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.archive_path = pythonscript_path_or_bytes
             with self.archive_path.open("rb") as input_file:
-                self.resource_contents = input_file.read()
+                self.resource_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(pythonscript_path_or_bytes, io.BufferedIOBase):
-            self.resource_contents = pythonscript_path_or_bytes.read()
+            self.resource_contents = utils.read_limited(pythonscript_path_or_bytes, max_input_size)
 
         if output_dir:
             self.output_dir = output_dir

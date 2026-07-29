@@ -73,16 +73,19 @@ class Pyc:
         output_dir: pathlib.Path = None,
         **kwargs,
     ) -> None:
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(file_path_or_bytes, str):
             file_path_or_bytes: pathlib.Path = pathlib.Path(file_path_or_bytes)
         if isinstance(file_path_or_bytes, pathlib.Path):
             utils.check_read_access(file_path_or_bytes)
+            if file_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.file_path = file_path_or_bytes
             input_file: BinaryIO
             with self.file_path.open("rb") as input_file:
-                self.file_contents = input_file.read()
+                self.file_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(file_path_or_bytes, io.BufferedIOBase):
-            self.file_contents = file_path_or_bytes.read()
+            self.file_contents = utils.read_limited(file_path_or_bytes, max_input_size)
 
         if output_dir:
             self.output_dir = output_dir

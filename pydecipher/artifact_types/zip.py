@@ -70,16 +70,19 @@ class ZipFile:
         TypeError
             Will raise a TypeError if the zip_path_or_bytes item is not a zip archive.
         """
+        max_input_size = int(kwargs.get("max_input_size", utils.ExtractionBudget.max_member_size))
         if isinstance(zip_path_or_bytes, str):
             zip_path_or_bytes: Path = Path(zip_path_or_bytes)
         if isinstance(zip_path_or_bytes, Path):
             utils.check_read_access(zip_path_or_bytes)
+            if zip_path_or_bytes.stat().st_size > max_input_size:
+                raise utils.ExtractionLimitError(f"artifact exceeds {max_input_size} input bytes")
             self.archive_path = zip_path_or_bytes
             input_file: BinaryIO
             with self.archive_path.open("rb") as input_file:
-                self.archive_contents = input_file.read()
+                self.archive_contents = utils.read_limited(input_file, max_input_size)
         if isinstance(zip_path_or_bytes, io.BufferedIOBase):
-            self.archive_contents = zip_path_or_bytes.read()
+            self.archive_contents = utils.read_limited(zip_path_or_bytes, max_input_size)
 
         if output_dir:
             self.output_dir = output_dir
