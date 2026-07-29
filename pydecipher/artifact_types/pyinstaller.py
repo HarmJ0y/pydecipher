@@ -720,11 +720,12 @@ class ZlibArchive:
                 decompression_errors += 1
                 logger.debug(f"[!] PYZ zlib decompression failed with error: {e}")
             else:
-                extraction_budget.commit_payload(compressed_data_size, len(uncompressed_data))
+                output_data = header_bytes + uncompressed_data
                 try:
+                    extraction_budget.commit_payload(compressed_data_size, len(output_data))
                     with utils.open_output_file(self.output_dir, key, suffix=".pyc") as (pyc_file, pyc_file_ptr):
-                        pyc_file_ptr.write(header_bytes + uncompressed_data)
-                except (OSError, ValueError) as error:
+                        pyc_file_ptr.write(output_data)
+                except (OSError, ValueError, utils.ExtractionLimitError) as error:
                     logger.warning(f"[!] Skipping occupied ZlibArchive output {key!r}: {error}.")
                     continue
                 successfully_extracted += 1

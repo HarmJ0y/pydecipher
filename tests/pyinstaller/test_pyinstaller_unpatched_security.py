@@ -162,7 +162,6 @@ def test_pyc_detector_rejects_incidental_marker(tmp_path) -> None:
         Pyc(io.BytesIO(payload), output_dir=tmp_path / "output")
 
 
-@_known_vulnerability("016: generated PYC headers bypass extraction limits")
 def test_pyz_budget_accounts_for_generated_header(tmp_path, monkeypatch) -> None:
     """The exact bytes written, including the generated header, fit the budget."""
     compressed = zlib.compress(b"")
