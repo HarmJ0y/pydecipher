@@ -94,7 +94,6 @@ def _carchive_bytes(member_count: int) -> bytes:
     return cookie + toc
 
 
-@_known_vulnerability("009: quadratic CArchive TOC parsing")
 def test_carchive_toc_parsing_copies_only_linear_data() -> None:
     """Parsing many small TOC entries does not repeatedly copy the suffix."""
     archive = CArchive.__new__(CArchive)
@@ -110,7 +109,6 @@ def test_carchive_toc_parsing_copies_only_linear_data() -> None:
     assert _SliceTrackingBytes.copied_bytes <= len(archive.archive_contents) * 4
 
 
-@_known_vulnerability("009: CArchive TOC materializes members before limits")
 def test_carchive_toc_respects_member_limit_during_parsing() -> None:
     """TOC materialization stops at the configured archive member limit."""
     archive = CArchive.__new__(CArchive)
@@ -135,7 +133,6 @@ class _SliceTrackingString(str):
         return result
 
 
-@_known_vulnerability("009: quadratic encrypted-PYZ key candidate discovery")
 def test_pyz_key_discovery_is_bounded_and_linear(tmp_path, monkeypatch) -> None:
     """A long printable key string cannot create quadratic slices/candidates."""
     key_file = tmp_path / "pyimod00_crypto_key.pyc"

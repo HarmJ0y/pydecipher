@@ -241,14 +241,19 @@ class CArchive:
             logger.warning("[!] CArchive TOC extends beyond the archive.")
             return
 
-        toc_bytes = self.archive_contents[self.toc_offset : self.toc_offset + self.toc_size]
+        toc_bytes = memoryview(self.archive_contents)[self.toc_offset : self.toc_offset + self.toc_size]
+        max_members = utils.get_extraction_budget(self.kwargs).max_members
         parsed_toc = []
-        while toc_bytes:
-            if len(toc_bytes) < 4:
+        cursor = 0
+        while cursor < len(toc_bytes):
+            if len(parsed_toc) >= max_members:
+                logger.warning(f"[!] CArchive TOC exceeds the {max_members} member limit.")
+                break
+            if len(toc_bytes) - cursor < 4:
                 logger.warning("[!] CArchive TOC ends with a truncated entry size.")
                 return
-            (entry_size,) = struct.unpack("!i", toc_bytes[0:4])
-            if entry_size < self.CTOCEntry.ENTRYLEN or entry_size > len(toc_bytes):
+            (entry_size,) = struct.unpack_from("!i", toc_bytes, cursor)
+            if entry_size < self.CTOCEntry.ENTRYLEN or cursor + entry_size > len(toc_bytes):
                 logger.warning(f"[!] CArchive TOC contains an invalid entry size: {entry_size}.")
                 return
             name_length = entry_size - self.CTOCEntry.ENTRYLEN
@@ -260,7 +265,11 @@ class CArchive:
                     compression_flag,
                     type_code,
                     name,
-                ) = struct.unpack(f"!iiiBB{name_length}s", toc_bytes[4:entry_size])
+                ) = struct.unpack_from(
+                    f"!iiiBB{name_length}s",
+                    toc_bytes,
+                    cursor + 4,
+                )
                 name = name.decode("utf-8").rstrip("\0")
             except (struct.error, UnicodeDecodeError):
                 logger.warning("[!] CArchive TOC contains a malformed entry.")
@@ -294,8 +303,7 @@ class CArchive:
                     name,
                 )
             )
-
-            toc_bytes = toc_bytes[entry_size:]
+            cursor += entry_size
         self.toc = parsed_toc
         logger.debug(f"[*] Found {len(self.toc)} entries in this PyInstaller CArchive")
 
@@ -578,12 +586,15 @@ class ZlibArchive:
             if not self.potential_keys:
                 with key_file.open("rb") as file_ptr:
                     file_strings = utils.parse_for_strings(file_ptr.read())
+                max_key_candidates = int(getattr(self, "kwargs", {}).get("max_key_candidates", 256))
                 s: str
                 for s in file_strings:
                     if len(s) >= 16 and "pyimod00_crypto_key" not in s:
-                        while len(s) >= 16:
-                            self.potential_keys.append(s[0:16])
-                            s = s[1:]
+                        candidate_count = min(len(s) - 15, max_key_candidates - len(self.potential_keys))
+                        for index in range(candidate_count):
+                            self.potential_keys.append(s[index : index + 16])
+                    if len(self.potential_keys) >= max_key_candidates:
+                        break
 
             logger.info(f"[*] Found these potential PyInstaller PYZ Archive encryption keys: {self.potential_keys}")
 
@@ -646,7 +657,7 @@ class ZlibArchive:
 
         if not self.encryption_key:
             while self.potential_keys:
-                encryption_key = self.potential_keys.pop(0)
+                encryption_key = self.potential_keys.pop()
                 try:
                     cipher: AES.AESCipher = AES.new(encryption_key.encode(), AES.MODE_CFB, initialization_vector)
                     decrypted_data = cipher.decrypt(data[CRYPT_BLOCK_SIZE:])  # will silently fail if password is wrong
