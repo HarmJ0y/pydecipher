@@ -322,7 +322,11 @@ class PortableExecutable(metaclass=abc.ABCMeta):
         if certificate_table_entry:
             overlay_start: int = self.pe.get_overlay_data_start_offset()
             certificate_start: int = certificate_table_entry.VirtualAddress
-            self.overlay = self.pe.__data__[overlay_start:certificate_start]
+            certificate_end = certificate_start + certificate_table_entry.Size
+            self.overlay = (
+                self.pe.__data__[overlay_start:certificate_start]
+                + self.pe.__data__[certificate_end:]
+            )
         else:
             self.overlay = self.pe.get_overlay()
 

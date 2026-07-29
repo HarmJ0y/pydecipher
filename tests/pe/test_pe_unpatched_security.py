@@ -90,7 +90,6 @@ def test_certificate_records_use_header_inclusive_aligned_lengths(
     assert seen_payloads == payloads
 
 
-@_known_vulnerability("024: payload after certificate table is hidden")
 def test_overlay_preserves_payload_after_certificate_table(tmp_path) -> None:
     """Only the declared certificate range is excluded from overlay output."""
     before = b"BEFORE"
