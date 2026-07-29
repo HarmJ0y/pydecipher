@@ -9,6 +9,7 @@ the interpreter binary or as a separate file entirely.
 import io
 import os
 import pathlib
+import shutil
 import zipfile
 import zlib
 from pathlib import Path
@@ -126,8 +127,37 @@ class ZipFile:
         with io.BytesIO(self.archive_contents) as zip_bytes:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             try:
-                f: zipfile.PyZipFile = zipfile.PyZipFile(zip_bytes, "r", zipfile.ZIP_DEFLATED)
-                f.extractall(self.output_dir)
+                with zipfile.PyZipFile(zip_bytes, "r", zipfile.ZIP_DEFLATED) as archive:
+                    for member in archive.infolist():
+                        try:
+                            output_path = utils.safe_output_path(self.output_dir, member.filename)
+                        except ValueError as error:
+                            logger.warning(f"[!] Skipping unsafe ZIP member {member.filename!r}: {error}.")
+                            continue
+
+                        if member.is_dir():
+                            output_path.mkdir(parents=True, exist_ok=True)
+                            continue
+
+                        output_path.parent.mkdir(parents=True, exist_ok=True)
+                        try:
+                            # Check containment again after creating parent
+                            # directories, immediately before opening the file.
+                            output_path = utils.safe_output_path(self.output_dir, member.filename)
+                        except ValueError as error:
+                            logger.warning(f"[!] Skipping unsafe ZIP member {member.filename!r}: {error}.")
+                            continue
+
+                        open_flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                        if hasattr(os, "O_NOFOLLOW"):
+                            open_flags |= os.O_NOFOLLOW
+                        try:
+                            output_fd = os.open(output_path, open_flags, 0o666)
+                        except OSError as error:
+                            logger.warning(f"[!] Could not safely extract ZIP member {member.filename!r}: {error}.")
+                            continue
+                        with os.fdopen(output_fd, "wb") as destination, archive.open(member) as source:
+                            shutil.copyfileobj(source, destination)
             except (zipfile.BadZipfile, zlib.error):
                 pass
             else:
