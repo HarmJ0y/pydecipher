@@ -5,16 +5,16 @@ import pathlib
 import re
 import shutil
 import struct
+import tempfile
 from contextlib import redirect_stderr
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import BinaryIO
-from typing import List
 from typing import Union
 
 import xdis
 from xdis.magics import magic2int
 from xdis.magics import magicint2version
-from xdis.magics import python_versions
 from xdis.unmarshal import load_code
 
 import pydecipher
@@ -80,7 +80,7 @@ class PYTHONSCRIPT:
         self.version_hint = kwargs.get("version_hint", None)
         if self.version_hint:
             try:
-                self.magic_num = bytecode.version_str_to_magic_num_int(self.version_hint)
+                self.magic_num = version_str_to_magic_num_int(self.version_hint)
             except:
                 pass  # TODO improve this error handling
         self.kwargs = kwargs
@@ -140,6 +140,8 @@ class PYTHONSCRIPT:
 
         # Method 2: Check to see if there are pyc files in the same directory with magic numbers
         for pyc_file in parent_dir.rglob("*.pyc"):
+            if pyc_file.is_symlink():
+                continue
             with pyc_file.open("rb") as pyc_file_ptr:
                 try:
                     magic_bytes = pyc_file_ptr.read(4)
@@ -213,36 +215,26 @@ class PYTHONSCRIPT:
 
         for co in code_objects:
             new_filename: str = self._clean_filename(co.co_filename)
-            self.output_dir.mkdir(parents=True, exist_ok=True)
             if brute_force:
-                bytecode_filepath: str = self.output_dir / magicint2version[self.magic_num] / new_filename
-                bytecode_filepath.parent.mkdir(exist_ok=True)
+                member_name = f"{magicint2version[self.magic_num]}/{new_filename}"
             else:
-                bytecode_filepath: str = str(self.output_dir.joinpath(new_filename))
+                member_name = new_filename
 
             try:
-                xdis.load.write_bytecode_file(bytecode_filepath, co, self.magic_num)
+                with tempfile.NamedTemporaryFile(suffix=".pyc") as temporary_file:
+                    xdis.load.write_bytecode_file(temporary_file.name, co, self.magic_num)
+                    temporary_file.seek(0)
+                    with utils.open_output_file(self.output_dir, member_name) as (bytecode_filepath, output_file):
+                        shutil.copyfileobj(temporary_file, output_file)
             except Exception as e:
-                logger.error(f"[!] Could not write file {bytecode_filepath.name} with error: {e}")
+                logger.error(f"[!] Could not write file {member_name} with error: {e}")
             else:
                 logger.info(f"[+] Successfully wrote file {new_filename} to {self.output_dir}")
 
     @staticmethod
     def cleanup(output_dir: pathlib.Path):
-        pythonscript_output_dir: List[pathlib.Path] = list(output_dir.rglob("pythonscript_output"))
-        if not pythonscript_output_dir:
-            return
-        else:
-            pythonscript_output_dir = pythonscript_output_dir[0]  # assumes only one pythonscript resource per artifact
-        if not pythonscript_output_dir.is_dir():
-            return
-
-        for item in os.listdir(pythonscript_output_dir):
-            item: pathlib.Path = pythonscript_output_dir.joinpath(item)
-            if not item.is_dir():
-                continue
-            if item.name in python_versions and list(item.rglob("*.py")) == []:
-                shutil.rmtree(item, ignore_errors=True)
+        """Leave extraction output intact; discovered paths are not safe cleanup targets."""
+        return
 
     def unpack(self):
         """Dump the pyc file from the Py2Exe object."""

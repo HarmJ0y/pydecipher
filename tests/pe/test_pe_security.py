@@ -58,3 +58,46 @@ def test_dump_resource_enforces_member_size_limit(tmp_path) -> None:
 
     assert artifact.dump_resource(resource_name) is None
     assert not (output_dir / resource_name).exists()
+
+
+def test_certificate_directory_does_not_follow_symlink(tmp_path) -> None:
+    """Certificate extraction cannot create or write through a linked directory."""
+    output_dir = tmp_path / "output"
+    outside_dir = tmp_path / "outside"
+    output_dir.mkdir()
+    outside_dir.mkdir()
+    (output_dir / "Authenticode_Certificates").symlink_to(
+        outside_dir,
+        target_is_directory=True,
+    )
+    security_directory = SimpleNamespace(
+        name="IMAGE_DIRECTORY_ENTRY_SECURITY",
+        Size=1,
+        VirtualAddress=0,
+    )
+    artifact = PortableExecutable.__new__(PortableExecutable)
+    artifact.output_dir = output_dir
+    artifact.kwargs = {}
+    artifact.pe = SimpleNamespace(
+        OPTIONAL_HEADER=SimpleNamespace(DATA_DIRECTORY=[security_directory]),
+        __data__=b"",
+    )
+
+    artifact.dump_certificates()
+
+    assert list(outside_dir.iterdir()) == []
+
+
+def test_overlay_does_not_replace_existing_file(tmp_path) -> None:
+    """PE overlay extraction preserves an occupied destination."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    victim = output_dir / "overlay_data"
+    victim.write_bytes(b"original")
+    artifact = PortableExecutable.__new__(PortableExecutable)
+    artifact.output_dir = output_dir
+    artifact.kwargs = {}
+    artifact.pe = SimpleNamespace(get_overlay=lambda: b"replacement")
+
+    assert artifact.dump_overlay() is None
+    assert victim.read_bytes() == b"original"

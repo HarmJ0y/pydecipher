@@ -11,10 +11,11 @@ If you pass in bytes to instantiate this class, and then call unpack, it will
 write the bytecode file to disk within the provided output directory.
 """
 import io
+import os
 import pathlib
 import struct
 import tempfile
-from shutil import copyfile
+from shutil import copyfileobj
 from typing import Any, BinaryIO, List, Union
 
 from xdis.magics import by_magic
@@ -253,7 +254,7 @@ class Pyc:
             new_filename_prefix = "pyc_"
             while True:
                 new_filepath = self.output_dir.joinpath(f"{new_filename_prefix}{counter}.pyc")
-                if not new_filepath.exists():
+                if not os.path.lexists(new_filepath):
                     break
                 counter += 1
             new_filename: pathlib.Path = new_filepath
@@ -263,4 +264,9 @@ class Pyc:
 
         if fixed_pyc_tempfile := self.check_and_fix_pyc(pyc_file, provided_version=self.version_hint):
             logger.info(f"[+] Writing fixed pyc file {new_filename.name} to {new_filename.parent}")
-            copyfile(fixed_pyc_tempfile.name, new_filename)
+            try:
+                with open(fixed_pyc_tempfile.name, "rb") as source_file:
+                    with utils.open_output_file(new_filename.parent, new_filename.name) as (_, output_file):
+                        copyfileobj(source_file, output_file)
+            except (OSError, ValueError) as error:
+                logger.warning(f"[!] Refusing to replace corrected pyc output {new_filename}: {error}")

@@ -7,7 +7,6 @@ the interpreter binary or as a separate file entirely.
 """
 
 import io
-import os
 import pathlib
 import zipfile
 import zlib
@@ -123,9 +122,9 @@ class ZipFile:
     def unpack(self) -> None:
         """Recursively search this artifact for frozen Python artifacts."""
         extraction_budget = utils.get_extraction_budget(self.kwargs)
+        extracted_files: List[pathlib.Path] = []
         zip_bytes: io.BytesIO
         with io.BytesIO(self.archive_contents) as zip_bytes:
-            self.output_dir.mkdir(parents=True, exist_ok=True)
             try:
                 with zipfile.PyZipFile(zip_bytes, "r", zipfile.ZIP_DEFLATED) as archive:
                     for member in archive.infolist():
@@ -164,19 +163,14 @@ class ZipFile:
                             logger.warning(f"[!] Skipping ZIP member {member.filename!r}: {error}.")
                             continue
                         extraction_budget.commit_payload(member.compress_size, extracted_size)
+                        extracted_files.append(output_path)
             except (zipfile.BadZipfile, zlib.error):
                 pass
             else:
                 seen_errors: List[str] = []
-                list_of_files: List[os.PathLike] = []
-                for (dirpath, dirnames, filenames) in os.walk(self.output_dir):
-                    for filename in filenames:
-                        full_path: pathlib.Path = Path(dirpath).joinpath(filename)
-                        list_of_files.append(full_path)
-
-                logger.info(f"[*] Unpacking {len(list_of_files)} files found in this zip file...")
+                logger.info(f"[*] Unpacking {len(extracted_files)} files found in this zip file...")
                 fp: pathlib.Path
-                for fp in list_of_files:
+                for fp in extracted_files:
                     try:
                         pydecipher.unpack(fp, **utils.next_recursion_kwargs(self.kwargs))
                     except (RuntimeError, utils.ExtractionLimitError) as e:

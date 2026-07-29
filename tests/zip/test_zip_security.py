@@ -74,3 +74,52 @@ def test_zip_extraction_enforces_total_size_limit(tmp_path, monkeypatch) -> None
 
     assert (output_dir / "first").stat().st_size == 700
     assert not (output_dir / "second").exists()
+
+
+def test_zip_extraction_does_not_replace_existing_file(tmp_path, monkeypatch) -> None:
+    """A ZIP member cannot replace a preexisting output file."""
+    output_dir = tmp_path / "output"
+    output_dir.mkdir()
+    victim = output_dir / "victim"
+    victim.write_bytes(b"original")
+    artifact = ZipFile(io.BytesIO(_zip_bytes("victim", b"replacement")), output_dir=output_dir)
+    monkeypatch.setattr("pydecipher.unpack", lambda *args, **kwargs: None)
+
+    artifact.unpack()
+
+    assert victim.read_bytes() == b"original"
+
+
+def test_zip_recurses_only_into_files_extracted_by_current_run(tmp_path, monkeypatch) -> None:
+    """Stale files and file symlinks in a reused output directory are ignored."""
+    output_dir = tmp_path / "output"
+    outside_file = tmp_path / "outside.pyc"
+    output_dir.mkdir()
+    (output_dir / "stale.pyc").write_bytes(b"stale")
+    outside_file.write_bytes(b"outside")
+    (output_dir / "linked.pyc").symlink_to(outside_file)
+    unpacked = []
+    monkeypatch.setattr("pydecipher.unpack", lambda path, **kwargs: unpacked.append(path))
+    artifact = ZipFile(io.BytesIO(_zip_bytes("fresh.pyc", b"fresh")), output_dir=output_dir)
+
+    artifact.unpack()
+
+    assert unpacked == [output_dir / "fresh.pyc"]
+
+
+def test_zip_does_not_create_output_through_symlinked_parent(tmp_path, monkeypatch) -> None:
+    """ZIP setup cannot create directories through an output-parent symlink."""
+    safe_dir = tmp_path / "safe"
+    outside_dir = tmp_path / "outside"
+    safe_dir.mkdir()
+    outside_dir.mkdir()
+    (safe_dir / "linked").symlink_to(outside_dir, target_is_directory=True)
+    monkeypatch.setattr("pydecipher.unpack", lambda *args, **kwargs: None)
+    artifact = ZipFile(
+        io.BytesIO(_zip_bytes("member", b"payload")),
+        output_dir=safe_dir / "linked" / "new-output",
+    )
+
+    artifact.unpack()
+
+    assert not (outside_dir / "new-output").exists()

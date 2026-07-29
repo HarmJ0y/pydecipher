@@ -26,6 +26,7 @@ from pydecipher import artifact_types, bytecode, logger, utils
 
 __all__ = [
     "_parse_args",
+    "_write_log_file",
     "write_remapping_file",
     "fix_remapping_conflicts",
     "fill_opmap_gaps",
@@ -34,6 +35,13 @@ __all__ = [
     "standard_pyc_remap",
     "run",
 ]
+
+
+def _write_log_file(output_dir: pathlib.Path, log_name: str, contents: str) -> pathlib.Path:
+    """Create a remap log without replacing an existing path."""
+    with utils.open_output_file(output_dir, log_name, mode="w") as (log_path, log_file):
+        log_file.write(contents)
+    return log_path
 
 
 def _parse_args(_args: List = None) -> argparse.Namespace:
@@ -173,19 +181,18 @@ def write_remapping_file(
     output_dict["remapped_opcodes"] = sorted(output_dict["remapped_opcodes"], key=lambda i: i["opcode"])
     output_dir: pathlib.Path = pathlib.Path(output_dir).resolve()
     output_filepath: pathlib.Path = output_dir / "remapping.txt"
-    if output_filepath.exists():
+    if os.path.lexists(output_filepath):
         logger.debug(
             f"[!] {str(output_filepath)} already exists. Incrementing filename until an available name is found."
         )
         counter: int = 1
         while True:
             new_filepath: pathlib.Path = output_dir / f"remapping-{counter}.txt"
-            if not new_filepath.exists():
+            if not os.path.lexists(new_filepath):
                 break
             counter += 1
         output_filepath = new_filepath
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with output_filepath.open("w") as output_file_ptr:
+    with utils.open_output_file(output_dir, output_filepath.name, mode="w") as (_, output_file_ptr):
         output_file_ptr.write(json.dumps(output_dict, sort_keys=True, indent=4))
         logger.info(f"[+] {str(output_filepath)} successfully written")
     return output_filepath
@@ -568,6 +575,8 @@ def standard_pyc_remap(
     determined_version: str = ""
     pyc_file: pathlib.Path
     for pyc_file in standard_bytecode_path.rglob("*.pyc"):
+        if pyc_file.is_symlink():
+            continue
         pyc_file_name: str = pyc_file.name.split(".")[0]
         if pyc_file_name == "__init__":
             continue
@@ -599,7 +608,7 @@ def standard_pyc_remap(
 
     remapped_files: Dict[str, List[pathlib.Path]] = {}
     for pyc_file in remapped_bytecode_path.rglob("*"):
-        if not pyc_file.is_file():
+        if pyc_file.is_symlink() or not pyc_file.is_file():
             continue
         try:
             kwargs: Dict[str, str] = {"version_hint": version}
@@ -850,10 +859,12 @@ def run(_args: List[str] = None) -> None:
         # If we successfully produced the remapping file, we want to also
         # include the logged output of remap.
         log_name: str = datetime.datetime.now().strftime("log_%H_%M_%S_%b_%d_%Y.txt")
-        log_file_ptr: TextIO
-        with output_dir.joinpath(log_name).open("w") as log_file_ptr:
-            log_file_ptr.write(log_stream.getvalue())
-        logging_options: Dict[str, Union[bool, os.PathLike]] = {"log_path": output_dir.joinpath(log_name)}
+        log_path = _write_log_file(output_dir, log_name, log_stream.getvalue())
+        log_stat = log_path.stat(follow_symlinks=False)
+        logging_options = {
+            "log_path": log_path,
+            "log_identity": (log_stat.st_dev, log_stat.st_ino),
+        }
         pydecipher.set_logging_options(**logging_options)
     else:
         logger.warning("[!] Remap couldn't produce the new opmap. Run with --verbose for more information.")

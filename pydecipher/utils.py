@@ -3,9 +3,9 @@
 import os
 import pathlib
 import re
+import stat
 import string
 import sys
-import tempfile
 import unicodedata
 import uuid
 from contextlib import contextmanager
@@ -21,6 +21,7 @@ __all__ = [
     "ExtractionLimitError",
     "get_extraction_budget",
     "next_recursion_kwargs",
+    "open_existing_file",
     "open_output_file",
     "make_output_directory",
     "slugify",
@@ -171,21 +172,24 @@ def _supports_secure_output_dir_fd() -> bool:
     return (
         hasattr(os, "O_DIRECTORY")
         and hasattr(os, "O_NOFOLLOW")
-        and all(function in os.supports_dir_fd for function in (os.open, os.mkdir, os.rename, os.unlink))
+        and all(function in os.supports_dir_fd for function in (os.open, os.mkdir, os.link, os.unlink))
     )
 
 
-def _open_directory_chain(output_dir: pathlib.Path, path_parts: List[str]) -> List[int]:
+def _open_directory_chain(
+    output_dir: pathlib.Path, path_parts: List[str], create_missing: bool = True
+) -> List[int]:
     """Open or create a directory chain without following symlinks."""
     directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     absolute_output_dir = pathlib.Path(os.path.abspath(output_dir))
     descriptors = [os.open(absolute_output_dir.anchor, directory_flags)]
     try:
         for part in [*absolute_output_dir.parts[1:], *path_parts]:
-            try:
-                os.mkdir(part, dir_fd=descriptors[-1])
-            except FileExistsError:
-                pass
+            if create_missing:
+                try:
+                    os.mkdir(part, dir_fd=descriptors[-1])
+                except FileExistsError:
+                    pass
             descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
     except Exception:
         for descriptor in reversed(descriptors):
@@ -198,64 +202,94 @@ def make_output_directory(output_dir: os.PathLike, member_name: str) -> pathlib.
     """Safely create an archive member directory below ``output_dir``."""
     output_path = safe_output_path(output_dir, member_name)
     path_parts = _safe_output_parts(member_name)
-    if _supports_secure_output_dir_fd():
-        descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts)
-        for descriptor in reversed(descriptors):
-            os.close(descriptor)
-    else:
-        output_path.mkdir(parents=True, exist_ok=True)
-        safe_output_path(output_dir, member_name)
+    if not _supports_secure_output_dir_fd():
+        raise NotImplementedError("secure output directory creation is not supported on this platform")
+
+    descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts)
+    for descriptor in reversed(descriptors):
+        os.close(descriptor)
     return output_path
 
 
+def open_existing_file(
+    path: os.PathLike, mode: str = "a", expected_identity: Tuple[int, int] = None
+):
+    """Open an existing regular file without following path-component symlinks."""
+    if mode != "a":
+        raise ValueError("existing output mode must be 'a'")
+    if not _supports_secure_output_dir_fd():
+        raise NotImplementedError("secure existing-file opening is not supported on this platform")
+
+    absolute_path = pathlib.Path(os.path.abspath(path))
+    descriptors = _open_directory_chain(absolute_path.parent, [], create_missing=False)
+    file_fd = None
+    try:
+        file_fd = os.open(
+            absolute_path.name,
+            os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW,
+            dir_fd=descriptors[-1],
+        )
+        file_stat = os.fstat(file_fd)
+        if not stat.S_ISREG(file_stat.st_mode):
+            raise ValueError("existing output is not a regular file")
+        if expected_identity and (file_stat.st_dev, file_stat.st_ino) != tuple(expected_identity):
+            raise ValueError("existing output identity changed")
+        output_file = os.fdopen(file_fd, mode)
+        file_fd = None
+        return output_file
+    finally:
+        if file_fd is not None:
+            os.close(file_fd)
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
+
+
 @contextmanager
-def open_output_file(output_dir: os.PathLike, member_name: str, suffix: str = ""):
+def open_output_file(output_dir: os.PathLike, member_name: str, suffix: str = "", mode: str = "wb"):
     """Atomically open a contained output file without following symlinks.
 
     On platforms with descriptor-relative filesystem operations, every parent
     component is opened with ``O_NOFOLLOW`` and the completed temporary file is
-    renamed relative to the already-open parent directory. Other platforms use
-    the same containment checks with an atomic temporary-file replacement.
+    linked relative to the already-open parent directory. Existing destinations
+    are never replaced.
     """
+    if mode not in ("w", "wb"):
+        raise ValueError("output mode must be 'w' or 'wb'")
+
     output_path = safe_output_path(output_dir, member_name, suffix=suffix)
     path_parts = _safe_output_parts(member_name, suffix=suffix)
 
-    if _supports_secure_output_dir_fd():
-        descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts[:-1])
-        parent_fd = descriptors[-1]
-        temporary_name = f".{path_parts[-1]}.{uuid.uuid4().hex}.tmp"
-        open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
-        temporary_fd = None
-        try:
-            temporary_fd = os.open(temporary_name, open_flags, 0o666, dir_fd=parent_fd)
-            with os.fdopen(temporary_fd, "wb") as output_file:
-                temporary_fd = None
-                yield output_path, output_file
-            os.rename(temporary_name, path_parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
-        except Exception:
-            if temporary_fd is not None:
-                os.close(temporary_fd)
-            try:
-                os.unlink(temporary_name, dir_fd=parent_fd)
-            except FileNotFoundError:
-                pass
-            raise
-        finally:
-            for descriptor in reversed(descriptors):
-                os.close(descriptor)
-        return
+    if not _supports_secure_output_dir_fd():
+        raise NotImplementedError("secure output creation is not supported on this platform")
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path = safe_output_path(output_dir, member_name, suffix=suffix)
-    temporary_file = tempfile.NamedTemporaryFile(dir=output_path.parent, delete=False)
-    temporary_path = pathlib.Path(temporary_file.name)
+    descriptors = _open_directory_chain(pathlib.Path(output_dir), path_parts[:-1])
+    parent_fd = descriptors[-1]
+    temporary_name = f".{path_parts[-1]}.{uuid.uuid4().hex}.tmp"
+    open_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+    temporary_fd = None
     try:
-        with temporary_file:
-            yield output_path, temporary_file
-        os.replace(temporary_path, output_path)
+        temporary_fd = os.open(temporary_name, open_flags, 0o666, dir_fd=parent_fd)
+        with os.fdopen(temporary_fd, mode) as output_file:
+            temporary_fd = None
+            yield output_path, output_file
+        os.link(
+            temporary_name,
+            path_parts[-1],
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
     except Exception:
-        temporary_path.unlink(missing_ok=True)
+        if temporary_fd is not None:
+            os.close(temporary_fd)
         raise
+    finally:
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        for descriptor in reversed(descriptors):
+            os.close(descriptor)
 
 
 def slugify(value: str, allow_unicode: bool = False) -> str:

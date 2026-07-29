@@ -33,7 +33,7 @@ ARTIFACT_TYPES : Dict[str, type]
 import logging
 import pathlib
 import sys
-from typing import Dict, Union
+from typing import Dict, Tuple, Union
 
 __all__ = [
     "__version__",
@@ -72,8 +72,21 @@ _stderr_console_handler.addFilter(lambda record: record.levelno >= logging.WARNI
 logger.addHandler(_stdout_console_handler)
 logger.addHandler(_stderr_console_handler)
 log_path: pathlib.Path = None
+log_identity: Tuple[int, int] = None
 verbose_enabled: bool = False
 quiet_enabled: bool = False
+_log_file_handler: logging.StreamHandler = None
+
+
+class _OwnedStreamHandler(logging.StreamHandler):
+    """A stream handler that owns and closes its file object."""
+
+    def close(self) -> None:
+        try:
+            if self.stream:
+                self.stream.close()
+        finally:
+            super().close()
 
 
 def register(artifact_class: type) -> type:
@@ -124,7 +137,12 @@ def get_logging_options() -> Dict[str, Union[bool, pathlib.Path]]:
     Dict[str, Union[bool, pathlib.Path]]
         A dictionary of the logging settings.
     """
-    return {"verbose": verbose_enabled, "quiet": quiet_enabled, "log_path": log_path}
+    return {
+        "verbose": verbose_enabled,
+        "quiet": quiet_enabled,
+        "log_path": log_path,
+        "log_identity": log_identity,
+    }
 
 
 def set_logging_options(**kwargs):
@@ -149,17 +167,30 @@ def set_logging_options(**kwargs):
     here again because this is enforced by argparse in
     :func:`pydecipher.main._parse_args`.
     """
-    global log_path
+    global log_path, log_identity, _log_file_handler
     if kwargs.get("verbose", []):
         _enable_verbose()
     if kwargs.get("quiet", []):
         _quiet_console_output()
     if kwargs.get("log_path", []):
-        log_path = kwargs["log_path"]
-        file_handler: logging.FileHandler = logging.FileHandler(log_path)
+        from pydecipher import utils
+
+        requested_log_path = pathlib.Path(kwargs["log_path"])
+        requested_identity = kwargs.get("log_identity")
+        log_stream = utils.open_existing_file(
+            requested_log_path,
+            expected_identity=requested_identity,
+        )
+        file_handler = _OwnedStreamHandler(log_stream)
         file_handler.setFormatter(log_format)
         file_handler.setLevel(logging.DEBUG)
+        if _log_file_handler is not None:
+            logger.removeHandler(_log_file_handler)
+            _log_file_handler.close()
         logger.addHandler(file_handler)
+        _log_file_handler = file_handler
+        log_path = requested_log_path
+        log_identity = requested_identity
 
 
 # Exports

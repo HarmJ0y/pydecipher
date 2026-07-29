@@ -129,9 +129,37 @@ def extract_pyc_files(source_dir: pathlib.Path) -> int:
 
     counter = 0
     for pyc_file in source_dir.rglob("*.pyc"):
-        new_dest = destination_dir.joinpath(pyc_file.relative_to(source_dir.parent))
-        new_dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(pyc_file, new_dest)
+        if pyc_file.is_symlink():
+            continue
+        relative_path = pyc_file.relative_to(source_dir.parent)
+        path_parts = relative_path.parts
+        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        absolute_destination = pathlib.Path(os.path.abspath(destination_dir))
+        descriptors = [os.open(absolute_destination.anchor, directory_flags)]
+        output_fd = None
+        try:
+            for part in [*absolute_destination.parts[1:], *path_parts[:-1]]:
+                try:
+                    os.mkdir(part, dir_fd=descriptors[-1])
+                except FileExistsError:
+                    pass
+                descriptors.append(os.open(part, directory_flags, dir_fd=descriptors[-1]))
+            output_fd = os.open(
+                path_parts[-1],
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                0o666,
+                dir_fd=descriptors[-1],
+            )
+            with pyc_file.open("rb") as source_file, os.fdopen(output_fd, "wb") as output_file:
+                output_fd = None
+                shutil.copyfileobj(source_file, output_file)
+        except FileExistsError:
+            continue
+        finally:
+            if output_fd is not None:
+                os.close(output_fd)
+            for descriptor in reversed(descriptors):
+                os.close(descriptor)
         counter += 1
     return counter
 

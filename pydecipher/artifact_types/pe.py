@@ -14,7 +14,7 @@ import os
 import pprint
 import re
 import pathlib
-from typing import Any, BinaryIO, Dict, List, Tuple, Union
+from typing import Any, BinaryIO, Dict, List, Union
 
 import pefile
 from asn1crypto import cms, pem, x509
@@ -209,10 +209,17 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             return
 
         if output_dir is None:
-            certificate_extraction_dir: pathlib.Path = self.output_dir.joinpath("Authenticode_Certificates")
+            certificate_extraction_dir = self.output_dir.joinpath("Authenticode_Certificates")
         else:
-            certificate_extraction_dir: pathlib.Path = output_dir
-        certificate_extraction_dir.mkdir(parents=True, exist_ok=True)
+            certificate_extraction_dir = pathlib.Path(output_dir)
+        try:
+            utils.make_output_directory(
+                certificate_extraction_dir.parent,
+                certificate_extraction_dir.name,
+            )
+        except (OSError, ValueError) as error:
+            logger.warning(f"[!] Could not safely create certificate output directory: {error}.")
+            return
 
         certificate_table_data: bytes = self.pe.__data__[certificate_table_entry.VirtualAddress :]
         while certificate_table_data:
@@ -234,6 +241,7 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                 logger.debug(f"[!] Failed to parse PKCS#7 structure: {e}")
                 continue
 
+            unnamed_certificate_index = 0
             for cert_choice in certificates:
                 if cert_choice.name != "certificate":
                     continue
@@ -253,7 +261,8 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                         cert_name = value if isinstance(value, str) else value[0]
                         break
                 if not cert_name:
-                    cert_name = f"{len(os.listdir(certificate_extraction_dir))}"
+                    cert_name = str(unnamed_certificate_index)
+                    unnamed_certificate_index += 1
                 cert_name = utils.slugify(cert_name, allow_unicode=True) + ".pem"
 
                 logger.debug(f"[+] Extracting Authenticode certificate {cert_name}.")
@@ -265,8 +274,12 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                 except utils.ExtractionLimitError as error:
                     logger.warning(f"[!] Skipping Authenticode certificate {cert_name!r}: {error}.")
                     continue
-                with utils.open_output_file(certificate_extraction_dir, cert_name) as (_, f):
-                    f.write(pem_bytes)
+                try:
+                    with utils.open_output_file(certificate_extraction_dir, cert_name) as (_, f):
+                        f.write(pem_bytes)
+                except (OSError, ValueError) as error:
+                    logger.warning(f"[!] Skipping occupied certificate output {cert_name!r}: {error}.")
+                    continue
                 extraction_budget.commit_payload(len(der_bytes), len(pem_bytes))
         self.certificates_dumped = True
 
@@ -311,8 +324,12 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             except utils.ExtractionLimitError as error:
                 logger.warning(f"[!] Skipping PE overlay: {error}.")
                 return
-            with utils.open_output_file(self.output_dir, "overlay_data") as (overlay_path, overlay_file_ptr):
-                overlay_file_ptr.write(self.overlay)
+            try:
+                with utils.open_output_file(self.output_dir, "overlay_data") as (overlay_path, overlay_file_ptr):
+                    overlay_file_ptr.write(self.overlay)
+            except (OSError, ValueError) as error:
+                logger.warning(f"[!] Skipping occupied PE overlay output: {error}.")
+                return
             extraction_budget.commit_payload(len(self.overlay), len(self.overlay))
             logger.info(f"[+] Dumped this PE's overlay data to {overlay_path.relative_to(self.output_dir.parent)}")
             return overlay_path

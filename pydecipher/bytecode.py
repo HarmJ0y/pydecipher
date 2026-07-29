@@ -29,7 +29,7 @@ from xdis import iscode
 from xdis.magics import magicint2version
 
 import pydecipher
-from pydecipher import logger
+from pydecipher import logger, utils
 
 
 def version_str_to_tuple(version: Union[str, tuple]) -> tuple:
@@ -284,7 +284,7 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
     alternate_opmap: Dict[str, int] = arg_tuple[1] or None
     logging_options: Dict[str, Union[bool, os.PathLike]] = arg_tuple[2] or None
 
-    if not pyc_file.is_file():
+    if pyc_file.is_symlink() or not pyc_file.is_file():
         return "no_action"
 
     # Because this function runs in a new pydecipher process entirely, logging
@@ -298,11 +298,9 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
     hijacked_stderr: io.StringIO = io.StringIO()
     with redirect_stdout(hijacked_stdout), redirect_stderr(hijacked_stderr):
         # Chop off c in pyc
-        new_file_name: pathlib.Path = pathlib.Path(str(pyc_file.resolve())[:-1])
-
-        # This prohibits the overwriting of existing files.
-        # if new_file_name.exists() and new_file_name.stat().st_size:
-        #     return "no_action"
+        new_file_name = pyc_file.parent / pyc_file.name[:-1]
+        if os.path.lexists(new_file_name):
+            return "no_action"
 
         logger.debug(f"[*] Decompiling file {pyc_file} of size {pyc_file.stat().st_size}")
         if not alternate_opmap:
@@ -327,11 +325,11 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
                 logger.error(f"[!] Failed to decompile file {pyc_file} with error: {e}")
                 stdout_val: str = hijacked_stdout.getvalue()
                 if stdout_val:
-                    with new_file_name.open("w") as file_ptr:
+                    with utils.open_output_file(pyc_file.parent, new_file_name.name, mode="w") as (_, file_ptr):
                         file_ptr.write(stdout_val)
                 return "error"
             else:
-                with new_file_name.open("w") as file_ptr:
+                with utils.open_output_file(pyc_file.parent, new_file_name.name, mode="w") as (_, file_ptr):
                     file_ptr.write(hijacked_stdout.getvalue())
                 logger.info(f"[+] Successfully decompiled {pyc_file}")
                 return "success"
@@ -359,7 +357,7 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
                 )
                 decompiler = _decompiler_for_version(version)
                 output_file: TextIO
-                with new_file_name.open(mode="w") as output_file:
+                with utils.open_output_file(pyc_file.parent, new_file_name.name, mode="w") as (_, output_file):
                     decompiler.main.decompile(
                         co,
                         bytecode_version=version_str_to_tuple(version),

@@ -20,12 +20,69 @@ import logging
 import os
 import pathlib
 import sys
-from typing import Dict, Generator, Iterable, List, Union
+from typing import Dict, Iterable, List, Union
 
 import pydecipher
 from pydecipher import artifact_types, bytecode, logger, utils
 
-__all__ = ["_parse_args", "unpack", "run"]
+__all__ = [
+    "_find_pyc_files",
+    "_parse_args",
+    "_relocate_decompiled_file",
+    "_write_log_file",
+    "unpack",
+    "run",
+]
+
+
+def _write_log_file(output_dir: pathlib.Path, log_name: str, contents: str) -> pathlib.Path:
+    """Create a log file without replacing an existing path."""
+    with utils.open_output_file(output_dir, log_name, mode="w") as (log_path, log_file):
+        log_file.write(contents)
+    return log_path
+
+
+def _relocate_decompiled_file(
+    source_path: pathlib.Path, relative_root: pathlib.Path, output_dir: pathlib.Path
+) -> pathlib.Path:
+    """Move a decompiled file below output_dir without following symlinks."""
+    relative_path = source_path.relative_to(relative_root)
+    source_lstat = source_path.stat(follow_symlinks=False)
+    if source_path.is_symlink():
+        raise ValueError("decompiled source path is a symlink")
+    with source_path.open("rb") as source_file:
+        source_fstat = os.fstat(source_file.fileno())
+        source_identity = (source_fstat.st_dev, source_fstat.st_ino)
+        if source_identity != (source_lstat.st_dev, source_lstat.st_ino):
+            raise ValueError("decompiled source path changed before it was opened")
+        with utils.open_output_file(output_dir, relative_path.as_posix()) as (output_path, output_file):
+            output_file.write(source_file.read())
+    try:
+        current_stat = source_path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        pass
+    else:
+        if (current_stat.st_dev, current_stat.st_ino) == source_identity:
+            source_path.unlink()
+    return output_path
+
+
+def _find_pyc_files(
+    root: pathlib.Path,
+    excluded_paths: Iterable[pathlib.Path] = (),
+    max_depth: int = None,
+) -> List[pathlib.Path]:
+    """Return regular, non-symlinked PYC/PYO files below root."""
+    excluded = set(excluded_paths)
+    if max_depth is None:
+        candidates = root.rglob("*.[pP][yY][cCoO]")
+    else:
+        candidates = utils.rglob_limit_depth(root, "*.[pP][yY][cCoO]", max_depth)
+    return [
+        path
+        for path in candidates
+        if path not in excluded and not path.is_symlink() and path.is_file()
+    ]
 
 
 def _parse_args(args: List = None) -> argparse.Namespace:
@@ -200,6 +257,7 @@ def run(args_in: List[str] = None) -> None:
         output_dir: pathlib.Path = (
             pathlib.Path.cwd() / f"pydecipher_output_{utils.slugify(artifact_path.name.split('.')[0])}"
         )
+    preexisting_output_pycs = set(_find_pyc_files(output_dir)) if output_dir.exists() else set()
 
     if artifact_path.is_file() and os.path.splitext(artifact_path)[1].lower() in (".pyc", ".pyo"):
         relocate_pys = True
@@ -237,10 +295,17 @@ def run(args_in: List[str] = None) -> None:
         dirnames: List[str]
         filenames: List[str]
         for (dirpath, dirnames, filenames) in os.walk(artifact_path):
+            dirnames[:] = [
+                dirname
+                for dirname in dirnames
+                if not pathlib.Path(dirpath).joinpath(dirname).is_symlink()
+            ]
             filename: str
             for filename in filenames:
                 if os.path.splitext(filename)[1].lower() in (".pyc", ".pyo"):
                     full_path: pathlib.Path = pathlib.Path(dirpath).joinpath(filename)
+                    if full_path.is_symlink():
+                        continue
                     try:
                         pyc_class_obj: artifact_types.pyc.Pyc = artifact_types.pyc.Pyc(
                             full_path, output_dir=full_path.parent, **kwargs
@@ -249,7 +314,7 @@ def run(args_in: List[str] = None) -> None:
                         pass
                     else:
                         pyc_class_obj.unpack()
-        pyc_files: List[pathlib.Path] = list(artifact_path.rglob("*.[pP][yY][cCoO]"))
+        pyc_files = _find_pyc_files(artifact_path)
     else:
         unpack(artifact_path, output_dir=str(output_dir), version_hint=version_hint)
 
@@ -259,11 +324,14 @@ def run(args_in: List[str] = None) -> None:
     # exception to this is when we pass in a single pyc file, or a directory of
     # pyc files, to be decompiled.
     if (output_dir.exists() and os.listdir(output_dir)) or pyc_files:
-        output_dir.mkdir(parents=True, exist_ok=True)
+        utils.make_output_directory(output_dir.parent, output_dir.name)
         log_name: str = datetime.datetime.now().strftime("log_%H_%M_%S_%b_%d_%Y.txt")
-        with output_dir.joinpath(log_name).open("w") as log_file_ptr:
-            log_file_ptr.write(log_stream.getvalue())
-        logging_options: Dict[str, pathlib.Path] = {"log_path": output_dir.joinpath(log_name)}
+        log_path = _write_log_file(output_dir, log_name, log_stream.getvalue())
+        log_stat = log_path.stat(follow_symlinks=False)
+        logging_options = {
+            "log_path": log_path,
+            "log_identity": (log_stat.st_dev, log_stat.st_ino),
+        }
         pydecipher.set_logging_options(**logging_options)
     else:
         logger.warning("[!] This artifact produced no additional output.")
@@ -271,19 +339,29 @@ def run(args_in: List[str] = None) -> None:
 
     # Determine which pyc files to decompile
     if not pyc_files:
-        pyc_files: Generator[os.PathLike, None, None] = output_dir.rglob("*.[pP][yY][cCoO]")
+        pyc_files = _find_pyc_files(output_dir, excluded_paths=preexisting_output_pycs)
         if not args.decompile_all:
             max_depth: int = 10
             # Search output directory with increasing recursive depth to find
             # first level of directories with .pyc files
             depth: int
             for depth in range(max_depth):
-                tmp: List[os.PathLike] = list(pydecipher.utils.rglob_limit_depth(output_dir, "*.[pP][yY][cCoO]", depth))
+                tmp = _find_pyc_files(
+                    output_dir,
+                    excluded_paths=preexisting_output_pycs,
+                    max_depth=depth,
+                )
                 if tmp:
                     pyc_files = tmp
                     break
 
     # Dispatch a pool of processes to decompile the specified group of pyc files
+    pyc_files = list(pyc_files)
+    preexisting_py_files = {
+        pathlib.Path(str(pyc_file)[:-1])
+        for pyc_file in pyc_files
+        if os.path.lexists(pathlib.Path(str(pyc_file)[:-1]))
+    }
     bytecode.process_pycs(pyc_files, alternate_opmap=alternate_opmap)
 
     # If any decompiled python needs to be moved to the output directory, do
@@ -298,14 +376,9 @@ def run(args_in: List[str] = None) -> None:
         pyc_file: pathlib.Path
         for pyc_file in pyc_files:
             py_file: pathlib.Path = pathlib.Path(str(pyc_file)[:-1])
-            if not py_file.exists():
+            if py_file in preexisting_py_files or not py_file.exists():
                 continue
-            rel_path: pathlib.Path = py_file.relative_to(relative_root)
-            new_filepath: pathlib.Path = output_dir.joinpath(rel_path)
-            py_file.rename(new_filepath)
-
-    # Perform any cleanup functions on output of decompilation
-    pydecipher.artifact_types.py2exe.PYTHONSCRIPT.cleanup(output_dir)
+            _relocate_decompiled_file(py_file, relative_root, output_dir)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import enum
+import hashlib
 import io
 import os
 import pathlib
@@ -298,9 +299,10 @@ class CArchive:
     def extract_files(self):
         extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         magic_nums: set = set()
+        nested_output_dirs: set = set()
         decompression_errors = 0
         successfully_extracted = 0
-        entry: CTOCEntry
+        entry: CArchive.CTOCEntry
         for entry in self.toc:
             try:
                 extraction_budget.begin_member(entry.compressed_data_size, entry.uncompressed_data_size)
@@ -360,7 +362,7 @@ class CArchive:
                         )
                         continue
                     try:
-                        data = pydecipher.bytecode.create_pyc_header(next(iter(magic_nums))) + data
+                        data = bytecode.create_pyc_header(next(iter(magic_nums))) + data
                     except (KeyError, ValueError, struct.error) as error:
                         logger.warning(f"[!] Skipping CArchive source entry {entry.name!r}: {error}.")
                         continue
@@ -388,14 +390,28 @@ class CArchive:
                     continue
 
             if entry.type_code != self.ArchiveItem.RUNTIME_OPTION:
-                with utils.open_output_file(self.output_dir, entry.name, suffix=file_suffix) as (file_path, f):
-                    f.write(data)
-                    successfully_extracted += 1
+                try:
+                    with utils.open_output_file(self.output_dir, entry.name, suffix=file_suffix) as (file_path, f):
+                        f.write(data)
+                        successfully_extracted += 1
+                except (OSError, ValueError) as error:
+                    logger.warning(f"[!] Skipping occupied CArchive output {entry.name!r}: {error}.")
+                    continue
 
             if entry.type_code in (self.ArchiveItem.PYZ, self.ArchiveItem.ZIPFILE):
-                output_dir_name = (
-                    str(file_path.parent.joinpath(utils.slugify(file_path.name.split(".")[0]))) + "_output"
-                )
+                output_dir_name = file_path.parent / f"{utils.slugify(file_path.stem)}_output"
+                if output_dir_name in nested_output_dirs:
+                    name_digest = hashlib.sha256(entry.name.encode("utf-8")).hexdigest()[:12]
+                    output_dir_name = file_path.parent / (
+                        f"{utils.slugify(file_path.stem)}_{name_digest}_output"
+                    )
+                    collision_index = 1
+                    while output_dir_name in nested_output_dirs:
+                        output_dir_name = file_path.parent / (
+                            f"{utils.slugify(file_path.stem)}_{name_digest}_{collision_index}_output"
+                        )
+                        collision_index += 1
+                nested_output_dirs.add(output_dir_name)
                 try:
                     pydecipher.unpack(
                         file_path,
@@ -526,7 +542,10 @@ class ZlibArchive:
             dir_of_pyz = Path.cwd()
 
         key_file = dir_of_pyz / "pyimod00_crypto_key.pyc"
-        if key_file.exists():
+        if key_file.is_symlink():
+            logger.warning(f"[!] Refusing symlinked ZlibArchive encryption key file {key_file}.")
+            return
+        if key_file.is_file():
             self.encrypted = True
             logger.debug(f"[+] Found ZlibArchive encryption key file at path {key_file}")
             crypto_key_filename: str  # full path of
@@ -664,7 +683,11 @@ class ZlibArchive:
                 timestamp = None
             else:
                 timestamp = self.compilation_time
-            header_bytes = pydecipher.bytecode.create_pyc_header(self.magic_int, compilation_ts=timestamp, file_size=0)
+            header_bytes = bytecode.create_pyc_header(
+                self.magic_int,
+                compilation_ts=timestamp,
+                file_size=0,
+            )
 
             compressed_data = self.archive_contents[position : position + compressed_data_size]
             if self.encrypted:
@@ -681,8 +704,12 @@ class ZlibArchive:
                 logger.debug(f"[!] PYZ zlib decompression failed with error: {e}")
             else:
                 extraction_budget.commit_payload(compressed_data_size, len(uncompressed_data))
-                with utils.open_output_file(self.output_dir, key, suffix=".pyc") as (pyc_file, pyc_file_ptr):
-                    pyc_file_ptr.write(header_bytes + uncompressed_data)
+                try:
+                    with utils.open_output_file(self.output_dir, key, suffix=".pyc") as (pyc_file, pyc_file_ptr):
+                        pyc_file_ptr.write(header_bytes + uncompressed_data)
+                except (OSError, ValueError) as error:
+                    logger.warning(f"[!] Skipping occupied ZlibArchive output {key!r}: {error}.")
+                    continue
                 successfully_extracted += 1
 
         if decompression_errors:
