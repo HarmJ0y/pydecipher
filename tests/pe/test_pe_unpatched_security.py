@@ -24,7 +24,6 @@ def _security_directory(offset: int, size: int):
     )
 
 
-@_known_vulnerability("003: Authenticode table size is ignored")
 def test_certificate_parser_stays_within_declared_table_size(
     tmp_path,
     monkeypatch,

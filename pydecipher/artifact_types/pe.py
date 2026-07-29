@@ -221,7 +221,9 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             logger.warning(f"[!] Could not safely create certificate output directory: {error}.")
             return
 
-        certificate_table_data: bytes = self.pe.__data__[certificate_table_entry.VirtualAddress :]
+        certificate_start = certificate_table_entry.VirtualAddress
+        certificate_end = certificate_start + certificate_table_entry.Size
+        certificate_table_data: bytes = self.pe.__data__[certificate_start:certificate_end]
         while certificate_table_data:
             # https://docs.microsoft.com/en-us/windows/desktop/Debug/pe-format#the-attribute-certificate-table-image-only
             cert_length: int = int.from_bytes(certificate_table_data[0:4], byteorder="little")
