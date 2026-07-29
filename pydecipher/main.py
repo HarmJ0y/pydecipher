@@ -127,6 +127,12 @@ def unpack(python_artifact: os.PathLike, output_dir: str = None, **kwargs) -> No
                 through string-analysis (and possibly brute-force decompilation).
                 If
     """
+    extraction_budget = utils.get_extraction_budget(kwargs)
+    recursion_depth = int(kwargs.get("_recursion_depth", 0))
+    if recursion_depth > extraction_budget.max_recursion_depth:
+        raise utils.ExtractionLimitError(
+            f"archive recursion exceeds {extraction_budget.max_recursion_depth} levels"
+        )
     if output_dir:
         output_dir: pathlib.Path = pathlib.Path(output_dir).resolve()
     type_instance: type = None

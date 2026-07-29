@@ -6,6 +6,7 @@ import re
 import string
 import sys
 import unicodedata
+from dataclasses import dataclass
 from typing import Generator, List, Set, Tuple
 
 import xdis
@@ -13,6 +14,10 @@ import xdis
 from pydecipher import logger
 
 __all__ = [
+    "ExtractionBudget",
+    "ExtractionLimitError",
+    "get_extraction_budget",
+    "next_recursion_kwargs",
     "slugify",
     "safe_output_path",
     "parse_for_strings",
@@ -22,6 +27,93 @@ __all__ = [
     "check_write_access",
     "check_for_our_xdis",
 ]
+
+
+class ExtractionLimitError(RuntimeError):
+    """Raised when recursive extraction exceeds a configured safety limit."""
+
+
+@dataclass
+class ExtractionBudget:
+    """Shared limits and accounting for one recursive extraction tree."""
+
+    max_member_size: int = 256 * 1024 * 1024
+    max_total_size: int = 1024 * 1024 * 1024
+    max_members: int = 10000
+    max_compression_ratio: int = 1000
+    max_recursion_depth: int = 10
+    total_size: int = 0
+    member_count: int = 0
+
+    def begin_member(self, compressed_size: int, declared_size: int) -> None:
+        """Account for a member and reject unsafe declared metadata."""
+        if compressed_size < 0 or declared_size < 0:
+            raise ExtractionLimitError("archive member has a negative size")
+        if self.member_count >= self.max_members:
+            raise ExtractionLimitError(f"archive tree exceeds {self.max_members} members")
+        self.member_count += 1
+        self.validate_payload(compressed_size, declared_size)
+
+    def validate_payload(self, compressed_size: int, output_size: int) -> None:
+        """Check a member's actual or declared expansion without accounting it."""
+        if output_size < 0 or compressed_size < 0:
+            raise ExtractionLimitError("archive member has a negative size")
+        if output_size > self.max_member_size:
+            raise ExtractionLimitError(f"archive member exceeds {self.max_member_size} bytes")
+        if self.total_size + output_size > self.max_total_size:
+            raise ExtractionLimitError(f"archive tree exceeds {self.max_total_size} extracted bytes")
+        if compressed_size == 0:
+            if output_size:
+                raise ExtractionLimitError("non-empty archive member has zero compressed size")
+        elif output_size > compressed_size * self.max_compression_ratio:
+            raise ExtractionLimitError(
+                f"archive member exceeds the {self.max_compression_ratio}:1 compression ratio limit"
+            )
+
+    def commit_payload(self, compressed_size: int, output_size: int) -> None:
+        """Validate and account for a successfully processed member payload."""
+        self.validate_payload(compressed_size, output_size)
+        self.total_size += output_size
+
+
+def get_extraction_budget(kwargs) -> ExtractionBudget:
+    """Return the shared extraction budget stored in an artifact's kwargs."""
+    budget = kwargs.get("_extraction_budget")
+    if budget is None:
+        budget = ExtractionBudget(
+            max_member_size=int(kwargs.get("max_member_size", ExtractionBudget.max_member_size)),
+            max_total_size=int(kwargs.get("max_total_size", ExtractionBudget.max_total_size)),
+            max_members=int(kwargs.get("max_members", ExtractionBudget.max_members)),
+            max_compression_ratio=int(
+                kwargs.get("max_compression_ratio", ExtractionBudget.max_compression_ratio)
+            ),
+            max_recursion_depth=int(kwargs.get("max_recursion_depth", ExtractionBudget.max_recursion_depth)),
+        )
+        if any(
+            limit <= 0
+            for limit in (
+                budget.max_member_size,
+                budget.max_total_size,
+                budget.max_members,
+                budget.max_compression_ratio,
+                budget.max_recursion_depth,
+            )
+        ):
+            raise ValueError("extraction limits must be positive integers")
+        kwargs["_extraction_budget"] = budget
+    return budget
+
+
+def next_recursion_kwargs(kwargs) -> dict:
+    """Copy artifact kwargs and advance the guarded recursion depth."""
+    budget = get_extraction_budget(kwargs)
+    recursion_depth = int(kwargs.get("_recursion_depth", 0))
+    if recursion_depth >= budget.max_recursion_depth:
+        raise ExtractionLimitError(f"archive recursion exceeds {budget.max_recursion_depth} levels")
+    nested_kwargs = dict(kwargs)
+    nested_kwargs["_recursion_depth"] = recursion_depth + 1
+    nested_kwargs["_extraction_budget"] = budget
+    return nested_kwargs
 
 
 def safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> pathlib.Path:

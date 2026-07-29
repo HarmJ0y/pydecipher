@@ -103,3 +103,43 @@ def test_zlibarchive_skips_traversal_entries(tmp_path, monkeypatch, member_name)
 
     assert not (tmp_path / "escaped.pyc").exists()
     assert not archive.output_dir.exists()
+
+
+def test_carchive_rejects_decompression_bomb(tmp_path) -> None:
+    """CArchive extraction enforces the configured member-size limit."""
+    payload = zlib.compress(b"0" * 2048)
+    archive = CArchive.__new__(CArchive)
+    archive.archive_contents = payload
+    archive.output_dir = tmp_path / "output"
+    archive.kwargs = {"max_member_size": 1024}
+    archive.toc = [
+        CArchive.CTOCEntry(
+            entry_offset=0,
+            compressed_data_size=len(payload),
+            uncompressed_data_size=2048,
+            compression_flag=True,
+            type_code=CArchive.ArchiveItem.DATA.value,
+            name="bomb",
+        )
+    ]
+
+    archive.extract_files()
+
+    assert not (archive.output_dir / "bomb").exists()
+
+
+def test_zlibarchive_rejects_decompression_bomb(tmp_path, monkeypatch) -> None:
+    """PYZ extraction enforces the configured member-size limit."""
+    payload = zlib.compress(b"0" * 2048)
+    archive = ZlibArchive.__new__(ZlibArchive)
+    archive.archive_contents = payload
+    archive.output_dir = tmp_path / "output"
+    archive.magic_int = 0
+    archive.encrypted = False
+    archive.kwargs = {"max_member_size": 1024}
+    archive.toc = {"bomb": (ZlibArchive.ArchiveItem.MODULE.value, 0, len(payload))}
+    monkeypatch.setattr(pydecipher.bytecode, "create_pyc_header", lambda *args, **kwargs: b"")
+
+    archive.extract_files()
+
+    assert not (archive.output_dir / "bomb.pyc").exists()

@@ -25,6 +25,28 @@ from pydecipher import logger
 from pydecipher import utils
 
 
+def _decompress_limited(data: bytes, extraction_budget: utils.ExtractionBudget) -> bytes:
+    """Decompress one zlib stream without exceeding the extraction budget."""
+    maximum_output = min(
+        extraction_budget.max_member_size,
+        extraction_budget.max_total_size - extraction_budget.total_size,
+    )
+    if maximum_output < 0:
+        raise utils.ExtractionLimitError("archive extraction budget is exhausted")
+
+    decompressor = zlib.decompressobj()
+    output = decompressor.decompress(data, maximum_output + 1)
+    if len(output) > maximum_output or decompressor.unconsumed_tail:
+        raise utils.ExtractionLimitError(f"compressed member exceeds {maximum_output} output bytes")
+    output += decompressor.flush(maximum_output + 1 - len(output))
+    if len(output) > maximum_output:
+        raise utils.ExtractionLimitError(f"compressed member exceeds {maximum_output} output bytes")
+    if not decompressor.eof:
+        raise zlib.error("incomplete or truncated zlib stream")
+    extraction_budget.validate_payload(len(data), len(output))
+    return output
+
+
 def _safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> Path:
     """Compatibility wrapper around the shared safe-path helper."""
     return utils.safe_output_path(output_dir, member_name, suffix=suffix)
@@ -125,6 +147,7 @@ class CArchive:
         if not os.access(self.output_dir.parent, os.W_OK):
             msg = f"[!] Cannot write output directory to dir: {str(self.output_dir)}."
             raise PermissionError(msg)
+        self.kwargs = kwargs
 
         if not self.validate_pyinstaller_carchive():
             raise TypeError(
@@ -236,11 +259,17 @@ class CArchive:
         logger.debug(f"[*] Found {len(self.toc)} entries in this PyInstaller CArchive")
 
     def extract_files(self):
+        extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         magic_nums: set = set()
         decompression_errors = 0
         successfully_extracted = 0
         entry: CTOCEntry
         for entry in self.toc:
+            try:
+                extraction_budget.begin_member(entry.compressed_data_size, entry.uncompressed_data_size)
+            except utils.ExtractionLimitError as error:
+                logger.warning(f"[!] Skipping CArchive entry {entry.name!r}: {error}.")
+                continue
             try:
                 file_path = _safe_output_path(self.output_dir, entry.name)
             except ValueError as error:
@@ -251,8 +280,8 @@ class CArchive:
 
             if entry.compression_flag:
                 try:
-                    data = zlib.decompress(data)
-                except zlib.error as e:
+                    data = _decompress_limited(data, extraction_budget)
+                except (zlib.error, utils.ExtractionLimitError) as e:
                     decompression_errors += 1
                     logger.debug(f"[!] PyInstaller CArchive decompression failed with error: {e}")
                     continue
@@ -263,6 +292,14 @@ class CArchive:
                             f" {entry.uncompressed_data_size}, however in actuality, uncompressed to be {len(data)}"
                             " bytes. This may be a sign that the CArchive was manually altered."
                         )
+            else:
+                try:
+                    extraction_budget.validate_payload(len(data), len(data))
+                except utils.ExtractionLimitError as error:
+                    logger.warning(f"[!] Skipping CArchive entry {entry.name!r}: {error}.")
+                    continue
+
+            extraction_budget.commit_payload(entry.compressed_data_size, len(data))
 
             file_suffix = ""
             if entry.type_code == self.ArchiveItem.PYSOURCE:
@@ -308,7 +345,14 @@ class CArchive:
                 output_dir_name = (
                     str(file_path.parent.joinpath(utils.slugify(file_path.name.split(".")[0]))) + "_output"
                 )
-                pydecipher.unpack(file_path, output_dir=output_dir_name)
+                try:
+                    pydecipher.unpack(
+                        file_path,
+                        output_dir=output_dir_name,
+                        **utils.next_recursion_kwargs(self.kwargs),
+                    )
+                except utils.ExtractionLimitError as error:
+                    logger.warning(f"[!] Skipping nested CArchive artifact {entry.name!r}: {error}.")
 
         if decompression_errors:
             logger.debug(f"[!] Failed to write {decompression_errors} files due to decompression errors.")
@@ -404,6 +448,7 @@ class ZlibArchive:
         if not os.access(self.output_dir.parent, os.W_OK):
             msg = f"[!] Cannot write output directory to dir: {str(self.output_dir)}."
             raise PermissionError(msg)
+        self.kwargs = kwargs
         # if not self.output_dir.exists():
         #     self.output_dir.mkdir(parents=True)
 
@@ -487,8 +532,11 @@ class ZlibArchive:
                 try:
                     cipher: AES.AESCipher = AES.new(encryption_key.encode(), AES.MODE_CFB, initialization_vector)
                     decrypted_data = cipher.decrypt(data[CRYPT_BLOCK_SIZE:])  # will silently fail if password is wrong
-                    _ = zlib.decompress(decrypted_data)  # ensures the password is correct
-                except zlib.error as e:
+                    _ = _decompress_limited(
+                        decrypted_data,
+                        utils.get_extraction_budget(getattr(self, "kwargs", {})),
+                    )  # ensures the password is correct
+                except (zlib.error, utils.ExtractionLimitError) as e:
                     logger.debug(f"[!] Decryption of .pyc failed with password {encryption_key}. Discarding key.")
                 else:
                     self.encryption_key = encryption_key
@@ -503,16 +551,22 @@ class ZlibArchive:
                 return None
 
     def extract_files(self) -> None:
+        extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         decompression_errors = 0
         successfully_extracted = 0
         for key in self.toc.keys():
+            (type_code, position, compressed_data_size) = self.toc[key]
+            try:
+                extraction_budget.begin_member(compressed_data_size, 0)
+            except utils.ExtractionLimitError as error:
+                logger.warning(f"[!] Skipping ZlibArchive entry {key!r}: {error}.")
+                continue
             try:
                 pyc_file = _safe_output_path(self.output_dir, key, suffix=".pyc")
             except ValueError as error:
                 logger.warning(f"[!] Skipping unsafe ZlibArchive entry {key!r}: {error}.")
                 continue
 
-            (type_code, position, compressed_data_size) = self.toc[key]
             if not hasattr(self, "compilation_time"):
                 timestamp = None
             else:
@@ -528,11 +582,12 @@ class ZlibArchive:
                 continue
 
             try:
-                uncompressed_data = zlib.decompress(compressed_data)
-            except zlib.error as e:
+                uncompressed_data = _decompress_limited(compressed_data, extraction_budget)
+            except (zlib.error, utils.ExtractionLimitError) as e:
                 decompression_errors += 1
                 logger.debug(f"[!] PYZ zlib decompression failed with error: {e}")
             else:
+                extraction_budget.commit_payload(compressed_data_size, len(uncompressed_data))
                 self.output_dir.mkdir(parents=True, exist_ok=True)
                 with pyc_file.open("wb") as pyc_file_ptr:
                     pyc_file_ptr.write(header_bytes + uncompressed_data)

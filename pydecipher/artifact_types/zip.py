@@ -9,7 +9,6 @@ the interpreter binary or as a separate file entirely.
 import io
 import os
 import pathlib
-import shutil
 import zipfile
 import zlib
 from pathlib import Path
@@ -123,12 +122,18 @@ class ZipFile:
 
     def unpack(self) -> None:
         """Recursively search this artifact for frozen Python artifacts."""
+        extraction_budget = utils.get_extraction_budget(self.kwargs)
         zip_bytes: io.BytesIO
         with io.BytesIO(self.archive_contents) as zip_bytes:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             try:
                 with zipfile.PyZipFile(zip_bytes, "r", zipfile.ZIP_DEFLATED) as archive:
                     for member in archive.infolist():
+                        try:
+                            extraction_budget.begin_member(member.compress_size, member.file_size)
+                        except utils.ExtractionLimitError as error:
+                            logger.warning(f"[!] Skipping ZIP member {member.filename!r}: {error}.")
+                            continue
                         try:
                             output_path = utils.safe_output_path(self.output_dir, member.filename)
                         except ValueError as error:
@@ -137,6 +142,7 @@ class ZipFile:
 
                         if member.is_dir():
                             output_path.mkdir(parents=True, exist_ok=True)
+                            extraction_budget.commit_payload(member.compress_size, 0)
                             continue
 
                         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -156,8 +162,18 @@ class ZipFile:
                         except OSError as error:
                             logger.warning(f"[!] Could not safely extract ZIP member {member.filename!r}: {error}.")
                             continue
-                        with os.fdopen(output_fd, "wb") as destination, archive.open(member) as source:
-                            shutil.copyfileobj(source, destination)
+                        extracted_size = 0
+                        try:
+                            with os.fdopen(output_fd, "wb") as destination, archive.open(member) as source:
+                                while chunk := source.read(1024 * 1024):
+                                    extracted_size += len(chunk)
+                                    extraction_budget.validate_payload(member.compress_size, extracted_size)
+                                    destination.write(chunk)
+                        except utils.ExtractionLimitError as error:
+                            output_path.unlink(missing_ok=True)
+                            logger.warning(f"[!] Skipping ZIP member {member.filename!r}: {error}.")
+                            continue
+                        extraction_budget.commit_payload(member.compress_size, extracted_size)
             except (zipfile.BadZipfile, zlib.error):
                 pass
             else:
@@ -172,8 +188,8 @@ class ZipFile:
                 fp: pathlib.Path
                 for fp in list_of_files:
                     try:
-                        pydecipher.unpack(fp, **self.kwargs)
-                    except RuntimeError as e:
+                        pydecipher.unpack(fp, **utils.next_recursion_kwargs(self.kwargs))
+                    except (RuntimeError, utils.ExtractionLimitError) as e:
                         if str(e) and str(e) not in seen_errors:
                             seen_errors.append(str(e))
 

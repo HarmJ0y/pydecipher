@@ -129,6 +129,13 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             if current_resource_name == resource_name:
                 rva: int = entry.directory.entries[0].directory.entries[0].data.struct.OffsetToData
                 size: int = entry.directory.entries[0].directory.entries[0].data.struct.Size
+                resource_data = self.pe.get_data(rva, size)
+                extraction_budget = utils.get_extraction_budget(self.kwargs)
+                try:
+                    extraction_budget.begin_member(size, len(resource_data))
+                except utils.ExtractionLimitError as error:
+                    logger.warning(f"[!] Skipping PE resource {resource_name!r}: {error}.")
+                    return
 
                 self.output_dir.mkdir(parents=True, exist_ok=True)
                 try:
@@ -138,7 +145,8 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                     return
                 outfile_ptr: BinaryIO
                 with resource_dump.open("wb") as outfile_ptr:
-                    outfile_ptr.write(self.pe.get_data(rva, size))
+                    outfile_ptr.write(resource_data)
+                extraction_budget.commit_payload(size, len(resource_data))
                 logger.info(f"[+] Successfully dumped PE resource {resource_name} to disk at {self.output_dir}")
                 return resource_dump
 
@@ -252,11 +260,18 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                 cert_name = utils.slugify(cert_name, allow_unicode=True) + ".pem"
 
                 logger.debug(f"[+] Extracting Authenticode certificate {cert_name}.")
+                der_bytes: bytes = cert_obj.dump()
+                pem_bytes: bytes = pem.armor("CERTIFICATE", der_bytes)
+                extraction_budget = utils.get_extraction_budget(self.kwargs)
+                try:
+                    extraction_budget.begin_member(len(der_bytes), len(pem_bytes))
+                except utils.ExtractionLimitError as error:
+                    logger.warning(f"[!] Skipping Authenticode certificate {cert_name!r}: {error}.")
+                    continue
                 f: BinaryIO
                 with certificate_extraction_dir.joinpath(cert_name).open("wb") as f:
-                    der_bytes: bytes = cert_obj.dump()
-                    pem_bytes: bytes = pem.armor("CERTIFICATE", der_bytes)
                     f.write(pem_bytes)
+                extraction_budget.commit_payload(len(der_bytes), len(pem_bytes))
         self.certificates_dumped = True
 
     def dump_overlay(self) -> pathlib.Path:
@@ -294,11 +309,18 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             self.overlay = self.pe.get_overlay()
 
         if self.overlay:
+            extraction_budget = utils.get_extraction_budget(self.kwargs)
+            try:
+                extraction_budget.begin_member(len(self.overlay), len(self.overlay))
+            except utils.ExtractionLimitError as error:
+                logger.warning(f"[!] Skipping PE overlay: {error}.")
+                return
             overlay_path: pathlib.Path = self.output_dir.joinpath("overlay_data")
             self.output_dir.mkdir(parents=True, exist_ok=True)
             overlay_file_ptr: BinaryIO
             with overlay_path.open("wb") as overlay_file_ptr:
                 overlay_file_ptr.write(self.overlay)
+            extraction_budget.commit_payload(len(self.overlay), len(self.overlay))
             logger.info(f"[+] Dumped this PE's overlay data to {overlay_path.relative_to(self.output_dir.parent)}")
             return overlay_path
 
@@ -351,8 +373,12 @@ class PortableExecutable(metaclass=abc.ABCMeta):
         artifact_path: pathlib.Path
         for artifact_path in unpack_me:
             output_dir_name: str = utils.slugify(str(artifact_path.name) + "_output")
-            pydecipher.unpack(
-                artifact_path,
-                output_dir=self.output_dir.joinpath(output_dir_name),
-                **self.kwargs,
-            )
+            try:
+                nested_kwargs = utils.next_recursion_kwargs(self.kwargs)
+                pydecipher.unpack(
+                    artifact_path,
+                    output_dir=self.output_dir.joinpath(output_dir_name),
+                    **nested_kwargs,
+                )
+            except utils.ExtractionLimitError as error:
+                logger.warning(f"[!] Skipping nested PE artifact {artifact_path}: {error}.")

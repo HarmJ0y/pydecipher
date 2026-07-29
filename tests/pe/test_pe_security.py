@@ -20,6 +20,7 @@ def _portable_executable_with_resource(output_dir, resource_name):
     artifact = PortableExecutable.__new__(PortableExecutable)
     artifact.pe = pe
     artifact.output_dir = output_dir
+    artifact.kwargs = {}
     return artifact
 
 
@@ -46,3 +47,14 @@ def test_dump_resource_rejects_symlink_escape(tmp_path) -> None:
 
     assert artifact.dump_resource(resource_name) is None
     assert not (outside_dir / "escaped").exists()
+
+
+def test_dump_resource_enforces_member_size_limit(tmp_path) -> None:
+    """PE resources share the recursive extraction size budget."""
+    output_dir = tmp_path / "output"
+    resource_name = "python36.dll"
+    artifact = _portable_executable_with_resource(output_dir, resource_name)
+    artifact.kwargs = {"max_member_size": 4}
+
+    assert artifact.dump_resource(resource_name) is None
+    assert not (output_dir / resource_name).exists()
