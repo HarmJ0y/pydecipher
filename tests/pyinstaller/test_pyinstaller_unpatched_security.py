@@ -154,7 +154,6 @@ def test_pyz_key_discovery_is_bounded_and_linear(tmp_path, monkeypatch) -> None:
     assert _SliceTrackingString.copied_characters <= len(candidate_source) * 4
 
 
-@_known_vulnerability("015: incidental marshal marker masks archive parsers")
 def test_pyc_detector_rejects_incidental_marker(tmp_path) -> None:
     """A marshal marker away from a valid PYC boundary is not sufficient."""
     payload = b"PK\x03\x04" + b"JUNK" + Pyc.MARSHALLED_CODE_OBJECT_LEADING_BYTES[0]

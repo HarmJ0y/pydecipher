@@ -126,17 +126,22 @@ class Pyc:
         return any(True for p in Pyc.MARSHALLED_CODE_OBJECT_LEADING_BYTES if first_eight_bytes.startswith(p))
 
     def validate_pyc_file(self) -> bool:
-        """Check if the contents of the class object is a valid zip archive.
+        """Check whether the contents plausibly contain Python bytecode.
 
         Returns
         -------
         bool
-           True if this is a valid zip archive, False if not.
+           True if this is a plausible PYC file, False if not.
         """
-        first_24_bytes: bytes = self.file_contents[0 : min(24, len(self.file_contents))]
-        if any(True for p in Pyc.MARSHALLED_CODE_OBJECT_LEADING_BYTES if p in first_24_bytes):
+        if Pyc.is_headerless(self.file_contents[:8]):
             return True
-        return False
+        if self.file_contents[:4] not in by_magic:
+            return False
+        return any(
+            self.file_contents[offset:].startswith(pattern)
+            for offset in (8, 12, 16)
+            for pattern in Pyc.MARSHALLED_CODE_OBJECT_LEADING_BYTES
+        )
 
     @staticmethod
     def check_and_fix_pyc(
