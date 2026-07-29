@@ -50,12 +50,11 @@ def version_str_to_tuple(version: Union[str, tuple]) -> tuple:
     if isinstance(version, tuple):
         return version
 
-    # Remove pypy suffix if present
     clean_version = version.replace("pypy", "").strip()
-    # Split on dots and convert to integers
-    parts = clean_version.split(".")
-    # Only use major.minor (first two parts)
-    return tuple(int(p) for p in parts[:2])
+    match = re.match(r"^(\d+)\.(\d+)", clean_version)
+    if not match:
+        raise ValueError(f"invalid Python version: {version}")
+    return int(match.group(1)), int(match.group(2))
 
 
 def version_to_str(version: Union[str, tuple]) -> str:
@@ -131,11 +130,11 @@ def create_pyc_header(magic_int: int, compilation_ts: Union[int, datetime] = Non
         The 8, 12, or 16 bytes of the header, depending on the compiled version
         for which the header was created.
     """
-    version: float = float(magicint2version[magic_int][:3])
+    version = version_str_to_tuple(magicint2version[magic_int])
     header_bytes: bytes = b""
-    if version >= 3.3:
+    if version >= (3, 3):
         header_bytes += struct.pack("<Hcc", magic_int, b"\r", b"\n")
-        if version >= 3.7:  # pep552 bytes
+        if version >= (3, 7):  # pep552 bytes
             header_bytes += struct.pack("<I", 0)  # pep552 bytes
     else:
         header_bytes += struct.pack("<Hcc", magic_int, b"\r", b"\n")
@@ -148,7 +147,7 @@ def create_pyc_header(magic_int: int, compilation_ts: Union[int, datetime] = Non
     else:
         header_bytes += struct.pack("<I", int(datetime.now().timestamp()))
 
-    if version >= 3.3:
+    if version >= (3, 3):
         # In Python 3.3+, these bytes are the size of the source code (mod 2^32)
         header_bytes += struct.pack("<I", file_size)
     return header_bytes
@@ -432,7 +431,7 @@ def diff_opcode(code_standard: CodeType, code_remapped: CodeType, version: str =
                 if opcode >= HAVE_ARGUMENT:
                     incrementer = 3
                 opcode_index.append(opcode)
-                if version and float(version[:3]) >= 3.6:
+                if version and version_str_to_tuple(version) >= (3, 6):
                     # After 3.6 all opcodes are two bytes, and the second byte
                     # is empty if the opcode doesn't take an argument.
                     incrementer = 2
