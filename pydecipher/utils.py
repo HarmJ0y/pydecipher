@@ -270,14 +270,14 @@ def parse_for_version_strings(data: bytes, formats=[r"[0-9](?:\.[0-9]+)+", "(?<=
             lower_limit: int = start_idx
             higher_limit: int = end_idx
             i: int
-            for i in range(1, surrounding_bytes_length):
+            for i in range(1, min(surrounding_bytes_length, start_idx + 1)):
                 if data[start_idx - i] in string.printable:
                     lower_limit = start_idx - i
                 else:
                     break
-            for i in range(1, surrounding_bytes_length):
+            for i in range(0, min(surrounding_bytes_length, len(data) - end_idx)):
                 if data[end_idx + i] in string.printable:
-                    higher_limit = end_idx + i
+                    higher_limit = end_idx + i + 1
                 else:
                     break
             surrounding_bytes: str = data[lower_limit:higher_limit]

@@ -182,6 +182,7 @@ class CArchive:
         return False
 
     def parse_toc(self):
+        self.toc = []
         # Read CArchive cookie
         if self.pyinstaller_version == 2.0 or self.pyinstaller_version == "unknown":
             try:
@@ -189,7 +190,7 @@ class CArchive:
                     "!8siiii",
                     self.archive_contents[self.magic_index : self.magic_index + self.PYINST20_COOKIE_SIZE],
                 )
-            except:
+            except (struct.error, ValueError):
                 pass
             else:
                 self.pyinstaller_version = 2.0
@@ -206,7 +207,7 @@ class CArchive:
                     "!8siiii64s",
                     self.archive_contents[self.magic_index : self.magic_index + self.PYINST21_COOKIE_SIZE],
                 )
-            except:
+            except (struct.error, UnicodeDecodeError, ValueError):
                 pass
             else:
                 self.pyinstaller_version = 2.1
@@ -217,34 +218,69 @@ class CArchive:
             logger.warning("[!] Could not parse CArchive because PyInstaller version is unknown.")
             return
 
-        self.python_version = float(self.python_version) / 10
+        try:
+            self.python_version = float(self.python_version) / 10
+        except (TypeError, ValueError):
+            logger.warning("[!] CArchive contains an invalid Python version.")
+            return
         logger.info(f"[*] This CArchive was built with Python {self.python_version}")
         logger.debug(f"[*] CArchive Package Size: {self.length_of_package}")
         logger.debug(f"[*] CArchive Python Version: {self.python_version}")
         if self.pyinstaller_version == 2.1:
             logger.debug(f"[*] CArchive Python Dynamic Library Name: {self.python_dynamic_lib}")
 
-        self.toc = []
-        toc_bytes = self.archive_contents[self.toc_offset : self.toc_offset + self.toc_size]
-        while toc_bytes:
-            (entry_size,) = struct.unpack("!i", toc_bytes[0:4])
-            name_length = entry_size - self.CTOCEntry.ENTRYLEN
-            (
-                entry_offset,
-                compressed_data_size,
-                uncompressed_data_size,
-                compression_flag,
-                type_code,
-                name,
-            ) = struct.unpack(f"!iiiBB{name_length}s", toc_bytes[4:entry_size])
+        if self.toc_offset < 0 or self.toc_size < 0:
+            logger.warning("[!] CArchive contains a negative TOC offset or size.")
+            return
+        toc_end = self.toc_offset + self.toc_size
+        if self.toc_offset > len(self.archive_contents) or toc_end > len(self.archive_contents):
+            logger.warning("[!] CArchive TOC extends beyond the archive.")
+            return
 
-            name = name.decode("utf-8").rstrip("\0")
+        toc_bytes = self.archive_contents[self.toc_offset : self.toc_offset + self.toc_size]
+        parsed_toc = []
+        while toc_bytes:
+            if len(toc_bytes) < 4:
+                logger.warning("[!] CArchive TOC ends with a truncated entry size.")
+                return
+            (entry_size,) = struct.unpack("!i", toc_bytes[0:4])
+            if entry_size < self.CTOCEntry.ENTRYLEN or entry_size > len(toc_bytes):
+                logger.warning(f"[!] CArchive TOC contains an invalid entry size: {entry_size}.")
+                return
+            name_length = entry_size - self.CTOCEntry.ENTRYLEN
+            try:
+                (
+                    entry_offset,
+                    compressed_data_size,
+                    uncompressed_data_size,
+                    compression_flag,
+                    type_code,
+                    name,
+                ) = struct.unpack(f"!iiiBB{name_length}s", toc_bytes[4:entry_size])
+                name = name.decode("utf-8").rstrip("\0")
+            except (struct.error, UnicodeDecodeError):
+                logger.warning("[!] CArchive TOC contains a malformed entry.")
+                return
+
+            entry_end = entry_offset + compressed_data_size
+            if (
+                entry_offset < 0
+                or compressed_data_size < 0
+                or uncompressed_data_size < 0
+                or entry_offset > len(self.archive_contents)
+                or entry_end > len(self.archive_contents)
+            ):
+                logger.warning(f"[!] CArchive TOC entry {name!r} points outside the archive.")
+                return
+            if compression_flag not in (0, 1):
+                logger.warning(f"[!] CArchive TOC entry {name!r} has an invalid compression flag.")
+                return
             if name == "":
                 name = str(uniquename())
                 logger.debug(f"[!] Warning: Found an unnamed file in CArchive. Using random name {name}")
 
             type_code = chr(type_code)
-            self.toc.append(
+            parsed_toc.append(
                 self.CTOCEntry(
                     entry_offset,
                     compressed_data_size,
@@ -256,6 +292,7 @@ class CArchive:
             )
 
             toc_bytes = toc_bytes[entry_size:]
+        self.toc = parsed_toc
         logger.debug(f"[*] Found {len(self.toc)} entries in this PyInstaller CArchive")
 
     def extract_files(self):
@@ -303,6 +340,9 @@ class CArchive:
 
             file_suffix = ""
             if entry.type_code == self.ArchiveItem.PYSOURCE:
+                if not data:
+                    logger.warning(f"[!] Skipping empty CArchive source entry {entry.name!r}.")
+                    continue
                 if ord(data[:1]) == ord(xdis.marsh.TYPE_CODE) or ord(data[:1]) == (
                     ord(xdis.marsh.TYPE_CODE) | xdis.unmarshal.FLAG_REF
                 ):
@@ -314,17 +354,30 @@ class CArchive:
                             f" {magic_num}, but also found numbers: {magic_nums}"
                         )
                     elif len(magic_nums) == 0:
-                        logger.warning(f"[!] No magic numbers have been found yet, queueing this file for later.")
-                        # TODO: add this file to a do-later list, when you know the magic num  #TODO does this actually happen? dig deeper...
-                        pass
-                    data = pydecipher.bytecode.create_pyc_header(next(iter(magic_nums))) + data
+                        logger.warning(
+                            f"[!] Skipping CArchive source entry {entry.name!r} because no Python magic number "
+                            "has been found."
+                        )
+                        continue
+                    try:
+                        data = pydecipher.bytecode.create_pyc_header(next(iter(magic_nums))) + data
+                    except (KeyError, ValueError, struct.error) as error:
+                        logger.warning(f"[!] Skipping CArchive source entry {entry.name!r}: {error}.")
+                        continue
                 else:
                     file_suffix = ".py"
                 if "pyi" not in entry.name:
                     logger.info(f"[!] Potential entrypoint found at script {entry.name}.py")
             elif entry.type_code == self.ArchiveItem.PYMODULE:
                 magic_bytes = data[:4]  # Python magic value
-                magic_nums.add(magic2int(magic_bytes))
+                if len(magic_bytes) != 4:
+                    logger.warning(f"[!] Skipping truncated CArchive module entry {entry.name!r}.")
+                    continue
+                try:
+                    magic_nums.add(magic2int(magic_bytes))
+                except (KeyError, TypeError, ValueError, struct.error) as error:
+                    logger.warning(f"[!] Skipping CArchive module entry {entry.name!r}: {error}.")
+                    continue
                 file_suffix = ".pyc"
 
             if file_suffix:
@@ -458,7 +511,11 @@ class ZlibArchive:
             )
 
     def validate_zlibarchive(self):
-        if self.archive_contents[:4] == b"PYZ\0" and CArchive.MAGIC not in self.archive_contents:
+        if (
+            len(self.archive_contents) >= 12
+            and self.archive_contents[:4] == b"PYZ\0"
+            and CArchive.MAGIC not in self.archive_contents
+        ):
             return True
         else:
             return False
@@ -511,16 +568,54 @@ class ZlibArchive:
                 logger.error(f"[*] Encryption key file detected, however no password was able to be retrieved.")
 
     def parse_toc(self) -> None:
-        self.magic_int = magic2int(self.archive_contents[4:8])
-        (toc_position,) = struct.unpack("!i", self.archive_contents[8:12])
-        self.toc = xdis.unmarshal.load_code(
-            self.archive_contents[toc_position:], self.magic_int
-        )  # TODO wrap this in try block?
-        logger.debug(f"[*] Found {len(self.toc)} entries in this PYZ archive")
+        self.toc = {}
+        try:
+            self.magic_int = magic2int(self.archive_contents[4:8])
+            (toc_position,) = struct.unpack("!i", self.archive_contents[8:12])
+        except (KeyError, TypeError, ValueError, struct.error) as error:
+            logger.warning(f"[!] PYZ archive contains an invalid header: {error}.")
+            return
+        if toc_position < 12 or toc_position >= len(self.archive_contents):
+            logger.warning("[!] PYZ archive TOC position is outside the archive.")
+            return
+        try:
+            parsed_toc = xdis.unmarshal.load_code(self.archive_contents[toc_position:], self.magic_int)
+        except Exception as error:
+            logger.warning(f"[!] Could not parse PYZ archive TOC: {error}.")
+            return
 
         # From PyInstaller 3.1+ toc is a list of tuples
-        if isinstance(self.toc, list):
-            self.toc = dict(self.toc)
+        if isinstance(parsed_toc, list):
+            try:
+                parsed_toc = dict(parsed_toc)
+            except (TypeError, ValueError) as error:
+                logger.warning(f"[!] PYZ archive contains an invalid TOC list: {error}.")
+                return
+        if not isinstance(parsed_toc, dict):
+            logger.warning("[!] PYZ archive TOC is not a dictionary.")
+            return
+
+        validated_toc = {}
+        for key, value in parsed_toc.items():
+            if not isinstance(key, str) or not isinstance(value, (tuple, list)) or len(value) != 3:
+                logger.warning(f"[!] Skipping malformed PYZ TOC entry {key!r}.")
+                continue
+            type_code, position, compressed_data_size = value
+            if not all(isinstance(item, int) for item in (type_code, position, compressed_data_size)):
+                logger.warning(f"[!] Skipping malformed PYZ TOC entry {key!r}.")
+                continue
+            member_end = position + compressed_data_size
+            if (
+                position < 12
+                or compressed_data_size < 0
+                or position > len(self.archive_contents)
+                or member_end > len(self.archive_contents)
+            ):
+                logger.warning(f"[!] Skipping out-of-bounds PYZ TOC entry {key!r}.")
+                continue
+            validated_toc[key] = (type_code, position, compressed_data_size)
+        self.toc = validated_toc
+        logger.debug(f"[*] Found {len(self.toc)} entries in this PYZ archive")
 
     def decrypt_file(self, data) -> Union[bytes, None]:
         CRYPT_BLOCK_SIZE = 16
