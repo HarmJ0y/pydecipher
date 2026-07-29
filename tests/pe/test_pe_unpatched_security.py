@@ -59,7 +59,6 @@ def test_certificate_parser_stays_within_declared_table_size(
     assert parse_attempts <= 1
 
 
-@_known_vulnerability("023: WIN_CERTIFICATE length and alignment confusion")
 def test_certificate_records_use_header_inclusive_aligned_lengths(
     tmp_path,
     monkeypatch,

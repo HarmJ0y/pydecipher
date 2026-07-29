@@ -226,11 +226,18 @@ class PortableExecutable(metaclass=abc.ABCMeta):
         certificate_table_data: bytes = self.pe.__data__[certificate_start:certificate_end]
         while certificate_table_data:
             # https://docs.microsoft.com/en-us/windows/desktop/Debug/pe-format#the-attribute-certificate-table-image-only
+            if len(certificate_table_data) < 8:
+                logger.warning("[!] Certificate table ends with a truncated WIN_CERTIFICATE header.")
+                break
             cert_length: int = int.from_bytes(certificate_table_data[0:4], byteorder="little")
+            if cert_length < 8 or cert_length > len(certificate_table_data):
+                logger.warning(f"[!] Certificate table contains an invalid record length: {cert_length}.")
+                break
             cert_version: bytes = certificate_table_data[4:6]  # noqa
             cert_type = certificate_table_data[6:8]  # noqa
-            cert: bytes = certificate_table_data[8 : 8 + cert_length]
-            certificate_table_data: bytes = certificate_table_data[8 + cert_length :]
+            cert: bytes = certificate_table_data[8:cert_length]
+            aligned_length = (cert_length + 7) & ~7
+            certificate_table_data = certificate_table_data[aligned_length:]
 
             # Extract all the X509 certificates from the PKCS#7 structure using asn1crypto
             try:
