@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 """Integration tests for the PyInstaller artifact type."""
+
 import os
 import pathlib
 import shutil
@@ -103,7 +104,7 @@ _all_test_data = [
         file_sha256="497d95671caf273355bdaffc3f31bc3bcf8e73d436ede9ee285cf27e3cb0c7f7",
         main_code_filename="test.py",
         remapping_file="obfuscated_opcodes/hello_world/correct_remapping.txt",
-        line_in_file="""with open('this_is_a_test.txt', 'w') as (f):""",
+        line_in_file="""with open("this_is_a_test.txt", "w") as f:""",
         items_in_pyinstarchive=65,
         zlib_archive_name="out00-PYZ.pyz",
         items_in_zlibarchive=135,

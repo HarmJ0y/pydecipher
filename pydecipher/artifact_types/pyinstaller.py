@@ -25,6 +25,45 @@ from pydecipher import logger
 from pydecipher import utils
 
 
+def _safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "") -> Path:
+    """Build an archive member path that is contained by ``output_dir``.
+
+    PyInstaller archives can use either POSIX or Windows path separators,
+    regardless of the platform on which they are being inspected. Treat both
+    forms as path separators and reject paths that could escape the extraction
+    directory.
+    """
+    if not isinstance(member_name, str) or not member_name:
+        raise ValueError("archive member name must be a non-empty string")
+    if "\x00" in member_name:
+        raise ValueError("archive member name contains a null byte")
+
+    posix_path = pathlib.PurePosixPath(member_name)
+    windows_path = pathlib.PureWindowsPath(member_name)
+    if posix_path.is_absolute() or windows_path.is_absolute() or windows_path.drive or windows_path.root:
+        raise ValueError("absolute archive member paths are not allowed")
+
+    path_parts = []
+    for part in member_name.replace("\\", "/").split("/"):
+        if part == "..":
+            raise ValueError("parent directory components are not allowed")
+        if part not in ("", "."):
+            path_parts.append(part)
+    if not path_parts:
+        raise ValueError("archive member name does not identify a file")
+    path_parts[-1] += suffix
+
+    output_root = Path(output_dir)
+    output_root_resolved = output_root.resolve(strict=False)
+    output_path = output_root.joinpath(*path_parts)
+    try:
+        output_path.resolve(strict=False).relative_to(output_root_resolved)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("archive member path escapes the output directory") from error
+
+    return output_path
+
+
 @pydecipher.register
 class CArchive:
     PYINST20_COOKIE_SIZE: int = 24  # For PyInstaller 2.0
@@ -236,6 +275,12 @@ class CArchive:
         successfully_extracted = 0
         entry: CTOCEntry
         for entry in self.toc:
+            try:
+                file_path = _safe_output_path(self.output_dir, entry.name)
+            except ValueError as error:
+                logger.warning(f"[!] Skipping unsafe CArchive entry {entry.name!r}: {error}.")
+                continue
+
             data = self.archive_contents[entry.entry_offset : entry.entry_offset + entry.compressed_data_size]
 
             if entry.compression_flag:
@@ -253,27 +298,12 @@ class CArchive:
                             " bytes. This may be a sign that the CArchive was manually altered."
                         )
 
-            if "\\" in entry.name:
-                tmp: PureWindowsPath = pathlib.PureWindowsPath(entry.name)
-            else:
-                tmp: Path = Path(entry.name)
-            # Make path relative to prevent writing to absolute paths outside output_dir
-            # This handles cases where entry.name is an absolute path like "/configuration" or "\configuration"
-            # For Windows paths, we need to check both is_absolute() and if it starts with a path separator
-            # because PureWindowsPath('\foo') on non-Windows is not absolute but still causes issues when joined
-            entry_name_str = str(tmp)
-            if tmp.is_absolute() or entry_name_str.startswith('/') or entry_name_str.startswith('\\'):
-                # Strip leading path separators
-                tmp = Path(entry_name_str.lstrip("/\\"))
-            file_path = pathlib.Path(self.output_dir).joinpath(tmp)
-            if len(file_path.parents) > 1:  # every path has '.' as a parent
-                file_path.parent.mkdir(parents=True, exist_ok=True)
-
+            file_suffix = ""
             if entry.type_code == self.ArchiveItem.PYSOURCE:
                 if ord(data[:1]) == ord(xdis.marsh.TYPE_CODE) or ord(data[:1]) == (
                     ord(xdis.marsh.TYPE_CODE) | xdis.unmarshal.FLAG_REF
                 ):
-                    file_path = file_path.parent / (file_path.name + ".pyc")
+                    file_suffix = ".pyc"
                     if len(magic_nums) > 1:
                         magic_num = next(iter(magic_nums))
                         logger.warning(
@@ -286,16 +316,24 @@ class CArchive:
                         pass
                     data = pydecipher.bytecode.create_pyc_header(next(iter(magic_nums))) + data
                 else:
-                    file_path = file_path.parent / (file_path.name + ".py")
+                    file_suffix = ".py"
                 if "pyi" not in entry.name:
                     logger.info(f"[!] Potential entrypoint found at script {entry.name}.py")
             elif entry.type_code == self.ArchiveItem.PYMODULE:
                 magic_bytes = data[:4]  # Python magic value
                 magic_nums.add(magic2int(magic_bytes))
-                file_path = file_path.parent / (file_path.name + ".pyc")
+                file_suffix = ".pyc"
+
+            if file_suffix:
+                try:
+                    file_path = _safe_output_path(self.output_dir, entry.name, suffix=file_suffix)
+                except ValueError as error:
+                    logger.warning(f"[!] Skipping unsafe CArchive entry {entry.name!r}: {error}.")
+                    continue
 
             if entry.type_code != self.ArchiveItem.RUNTIME_OPTION:
                 self.output_dir.mkdir(parents=True, exist_ok=True)
+                file_path.parent.mkdir(parents=True, exist_ok=True)
                 with file_path.open(mode="wb") as f:
                     f.write(data)
                     successfully_extracted += 1
@@ -502,6 +540,12 @@ class ZlibArchive:
         decompression_errors = 0
         successfully_extracted = 0
         for key in self.toc.keys():
+            try:
+                pyc_file = _safe_output_path(self.output_dir, key, suffix=".pyc")
+            except ValueError as error:
+                logger.warning(f"[!] Skipping unsafe ZlibArchive entry {key!r}: {error}.")
+                continue
+
             (type_code, position, compressed_data_size) = self.toc[key]
             if not hasattr(self, "compilation_time"):
                 timestamp = None
@@ -523,7 +567,6 @@ class ZlibArchive:
                 decompression_errors += 1
                 logger.debug(f"[!] PYZ zlib decompression failed with error: {e}")
             else:
-                pyc_file = self.output_dir / str(key + ".pyc")
                 self.output_dir.mkdir(parents=True, exist_ok=True)
                 with pyc_file.open("wb") as pyc_file_ptr:
                     pyc_file_ptr.write(header_bytes + uncompressed_data)

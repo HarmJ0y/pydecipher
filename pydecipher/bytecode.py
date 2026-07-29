@@ -7,6 +7,7 @@ REMAPPED_OPCODE_ERROR_REGEX : re.Pattern
     A regex pattern that matches the decompyle3 error typically seen when trying
     to decompile Python bytecode that has had its opcodes remapped.
 """
+
 import io
 import json
 import os
@@ -22,6 +23,7 @@ from typing import Any, Dict, Iterable, List, TextIO, Tuple, Union
 
 import pebble
 import decompyle3
+import uncompyle6
 import xdis
 from xdis import iscode
 from xdis.magics import magicint2version
@@ -30,14 +32,14 @@ import pydecipher
 from pydecipher import logger
 
 
-def version_str_to_tuple(version: str) -> tuple:
+def version_str_to_tuple(version: Union[str, tuple]) -> tuple:
     """Convert a version string like '3.6' or '3.10.1' to a tuple like (3, 6).
 
     xdis 6.x requires version tuples instead of version strings for get_opcode().
 
     Parameters
     ----------
-    version : str
+    version : Union[str, tuple]
         A version string like '3.6', '3.10', '2.7', or '3.6pypy'
 
     Returns
@@ -45,6 +47,9 @@ def version_str_to_tuple(version: str) -> tuple:
     tuple
         A version tuple like (3, 6) or (3, 10)
     """
+    if isinstance(version, tuple):
+        return version
+
     # Remove pypy suffix if present
     clean_version = version.replace("pypy", "").strip()
     # Split on dots and convert to integers
@@ -52,9 +57,18 @@ def version_str_to_tuple(version: str) -> tuple:
     # Only use major.minor (first two parts)
     return tuple(int(p) for p in parts[:2])
 
+
+def version_to_str(version: Union[str, tuple]) -> str:
+    """Return an xdis version as a dotted string."""
+    if isinstance(version, str):
+        return version
+    return ".".join(str(part) for part in version)
+
+
 __all__ = [
     "REMAPPED_OPCODE_ERROR_REGEX",
     "version_str_to_tuple",
+    "version_to_str",
     "version_str_to_magic_num_int",
     "create_pyc_header",
     "process_pycs",
@@ -65,6 +79,15 @@ __all__ = [
 ]
 
 REMAPPED_OPCODE_ERROR_REGEX = re.compile("Parse error at or near .+ instruction at offset [0-9]+$")
+DECOMPYLE3_BYTECODE_VERSIONS = {(3, 7), (3, 8)}
+
+
+def _decompiler_for_version(version: Union[str, tuple]):
+    """Select a decompiler that supports the supplied bytecode version."""
+    version_tuple = version_str_to_tuple(version)
+    if version_tuple[:2] in DECOMPYLE3_BYTECODE_VERSIONS:
+        return decompyle3
+    return uncompyle6
 
 
 def version_str_to_magic_num_int(version_str: str) -> int:
@@ -284,8 +307,13 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
         logger.debug(f"[*] Decompiling file {pyc_file} of size {pyc_file.stat().st_size}")
         if not alternate_opmap:
             try:
-                decompyle3.decompile_file(str(pyc_file), outstream=sys.stdout)
-            except decompyle3.semantics.parser_error.ParserError as e:
+                version = xdis.load.load_module(str(pyc_file), get_code=False)[0]
+                decompiler = _decompiler_for_version(version)
+                decompiler.decompile_file(str(pyc_file), outstream=sys.stdout)
+            except (
+                decompyle3.semantics.parser_error.ParserError,
+                uncompyle6.semantics.parser_error.ParserError,
+            ) as e:
                 logger.warning(f"[!] Failed to decompile file {pyc_file}")
                 if REMAPPED_OPCODE_ERROR_REGEX.match(str(e.error)):
                     logger.error(
@@ -329,11 +357,12 @@ def decompile_pyc(arg_tuple: Tuple[pathlib.Path, Dict[str, int], Dict[str, Union
                 ) = xdis.disasm.disassemble_file(
                     str(pyc_file), outstream=open(os.devnull, "w"), alternate_opmap=alternate_opmap
                 )
+                decompiler = _decompiler_for_version(version)
                 output_file: TextIO
                 with new_file_name.open(mode="w") as output_file:
-                    decompyle3.main.decompile(
-                        version,
+                    decompiler.main.decompile(
                         co,
+                        bytecode_version=version_str_to_tuple(version),
                         timestamp=timestamp,
                         source_size=source_size,
                         magic_int=magic_int,

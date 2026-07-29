@@ -4,6 +4,7 @@
 remap takes in Python bytecode that has been compiled using non-standard (remapped) opcodes, and attempts to detect the
 new opmap key value pairings. The output of remap is a JSON file with information about the new opmap.
 """
+
 import argparse
 import copy
 import datetime
@@ -355,10 +356,11 @@ def megafile_remap(
         reference_source_size,
         reference_sip_hash,
     ) = xdis.disasm.disassemble_file(str(reference_megafile), outstream=open(os.devnull, "w"))
+    reference_version = bytecode.version_to_str(reference_version)
 
     fixed_megafile_file: pathlib.Path
     if fixed_megafile_file := artifact_types.pyc.Pyc.check_and_fix_pyc(
-        remapped_bytecode_path, provided_version=str(reference_version)
+        remapped_bytecode_path, provided_version=reference_version
     ):
         logger.error(
             f"[+] Duplicated megafile file {str(remapped_bytecode_path)} to correct issues with the pyc. New filepath:"
@@ -394,8 +396,8 @@ def megafile_remap(
         )
         raise RuntimeError
 
-    remappings: Dict[int, Dict[int, int]] = bytecode.diff_opcode(reference_co, remapped_co, str(reference_version))
-    return remappings, str(reference_version)
+    remappings: Dict[int, Dict[int, int]] = bytecode.diff_opcode(reference_co, remapped_co, reference_version)
+    return remappings, reference_version
 
 
 def opcode_constants_remap(
@@ -458,13 +460,14 @@ def opcode_constants_remap(
     source_size: int
     sip_hash: str
     try:
-        (filename, co, version, timestamp, magic_int, is_pypy, source_size, sip_hash) = xdis.disasm.disassemble_file(
-            str(opcode_file), header=True, outstream=open(os.devnull, "w")
+        filename, co, version, timestamp, magic_int, is_pypy, source_size, sip_hash = xdis.disasm.disassemble_file(
+            str(opcode_file), asm_format="header", outstream=open(os.devnull, "w")
         )
     except Exception as e:
         e: Exception
         logger.error(f"[!] Couldn't disassemble opcode file {opcode_file} with error: {e}")
         raise e
+    version = bytecode.version_to_str(version)
 
     built_opmap: Dict[str, int] = {}
 
@@ -530,7 +533,7 @@ def opcode_constants_remap(
     opval: int
     for opname, opval in built_opmap.items():
         remappings[opc.opmap[opname]] = {opval: 1}
-    return remappings, str(version)
+    return remappings, version
 
 
 def standard_pyc_remap(
@@ -662,7 +665,9 @@ def standard_pyc_remap(
                     remapped_is_pypy,
                     remapped_source_size,
                     remapped_sip_hash,
-                ) = xdis.disasm.disassemble_file(str(pyc_filepath), header=True, outstream=open(os.devnull, "w"))
+                ) = xdis.disasm.disassemble_file(
+                    str(pyc_filepath), asm_format="header", outstream=open(os.devnull, "w")
+                )
 
                 reference_filename: str
                 reference_co: CodeType  # can also be xdis codetypes
@@ -685,7 +690,7 @@ def standard_pyc_remap(
             except Exception:
                 continue
 
-            version = str(reference_version)
+            version = bytecode.version_to_str(reference_version)
 
             try:
                 remappings: Dict[int, int] = bytecode.diff_opcode(reference_co, remapped_co, version)
