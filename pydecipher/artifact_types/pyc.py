@@ -18,7 +18,8 @@ import tempfile
 from shutil import copyfileobj
 from typing import Any, BinaryIO, List, Union
 
-from xdis.magics import by_magic
+from xdis import iscode
+from xdis.magics import by_magic, magic2int
 
 import pydecipher
 from pydecipher import bytecode, logger, utils
@@ -137,11 +138,22 @@ class Pyc:
             return True
         if self.file_contents[:4] not in by_magic:
             return False
-        return any(
-            self.file_contents[offset:].startswith(pattern)
-            for offset in (8, 12, 16)
-            for pattern in Pyc.MARSHALLED_CODE_OBJECT_LEADING_BYTES
-        )
+        for offset in (8, 12, 16):
+            if not any(self.file_contents[offset:].startswith(pattern) for pattern in self.MARSHALLED_CODE_OBJECT_LEADING_BYTES):
+                continue
+            try:
+                marshalled_data = io.BytesIO(self.file_contents[offset:])
+                unmarshaller = xdis.unmarshal._VersionIndependentUnmarshaller(
+                    marshalled_data,
+                    magic2int(self.file_contents[:4]),
+                    False,
+                )
+                code_object = unmarshaller.load()
+            except Exception:
+                continue
+            if iscode(code_object) and marshalled_data.tell() == len(self.file_contents) - offset:
+                return True
+        return False
 
     @staticmethod
     def check_and_fix_pyc(

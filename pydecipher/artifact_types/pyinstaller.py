@@ -53,6 +53,14 @@ def _safe_output_path(output_dir: os.PathLike, member_name: str, suffix: str = "
     return utils.safe_output_path(output_dir, member_name, suffix=suffix)
 
 
+def _is_marshaled_code(data: bytes) -> bool:
+    """Return whether data begins with a raw marshal code-object tag."""
+    return bool(data) and data[0] in (
+        ord(xdis.marsh.TYPE_CODE),
+        ord(xdis.marsh.TYPE_CODE) | xdis.unmarshal.FLAG_REF,
+    )
+
+
 @pydecipher.register
 class CArchive:
     PYINST20_COOKIE_SIZE: int = 24  # For PyInstaller 2.0
@@ -62,7 +70,7 @@ class CArchive:
     archive_path: pathlib.Path
     archive_contents: bytes
     pyinstaller_version: float
-    python_version: float
+    python_version: str
     toc: List["CTOCEntry"] = []
     output_dir: Path
     potential_zlib_archive_passwords: List[str] = []
@@ -159,36 +167,23 @@ class CArchive:
             )
 
     def validate_pyinstaller_carchive(self):
-        self.magic_index = self.archive_contents.find(self.MAGIC)
-        cookie_size = len(self.archive_contents) - self.magic_index
-        if self.magic_index > 0:
-            if cookie_size == self.PYINST20_COOKIE_SIZE:
-                self.pyinstaller_version = 2.0
-                logger.debug("[*] PyInstaller version: 2.0")
+        for cookie_size, version in (
+            (self.PYINST21_COOKIE_SIZE, 2.1),
+            (self.PYINST20_COOKIE_SIZE, 2.0),
+        ):
+            magic_index = len(self.archive_contents) - cookie_size
+            if magic_index >= 0 and self.archive_contents[magic_index : magic_index + len(self.MAGIC)] == self.MAGIC:
+                self.magic_index = magic_index
+                self.pyinstaller_version = version
+                logger.debug(f"[*] PyInstaller version: {version}")
                 return True
-            elif cookie_size == self.PYINST21_COOKIE_SIZE:
-                self.pyinstaller_version = 2.1  # or greater
-                return True
-                logger.debug("[*] PyInstaller version: 2.1")
-            else:
-                logger.debug(
-                    f"[!] PyInstaller cookie size is {cookie_size}, which does not correspond to a known "
-                    "version of PyInstaller."
-                )
-                if cookie_size < 100:
-                    # Some valid cookies were seen with size 94
-                    self.pyinstaller_version = "unknown"
-                    return True
-                else:
-                    return False
-        else:
-            logger.debug("[!] Could not find PyInstaller magic within this archive.")
+        logger.debug("[!] Could not find an EOF-aligned PyInstaller cookie.")
         return False
 
     def parse_toc(self):
         self.toc = []
         # Read CArchive cookie
-        if self.pyinstaller_version == 2.0 or self.pyinstaller_version == "unknown":
+        if self.pyinstaller_version == 2.0:
             try:
                 (magic, self.length_of_package, self.toc_offset, self.toc_size, self.python_version,) = struct.unpack(
                     "!8siiii",
@@ -198,7 +193,7 @@ class CArchive:
                 pass
             else:
                 self.pyinstaller_version = 2.0
-        if self.pyinstaller_version == 2.1 or self.pyinstaller_version == "unknown":
+        if self.pyinstaller_version == 2.1:
             try:
                 (
                     magic,
@@ -213,17 +208,20 @@ class CArchive:
                 )
             except (struct.error, UnicodeDecodeError, ValueError):
                 pass
-            else:
-                self.pyinstaller_version = 2.1
-                if self.python_dynamic_lib:
+            if self.python_dynamic_lib:
+                try:
                     self.python_dynamic_lib = self.python_dynamic_lib.decode("ascii").rstrip("\x00")
-
-        if self.pyinstaller_version == "unknown":
-            logger.warning("[!] Could not parse CArchive because PyInstaller version is unknown.")
-            return
+                except UnicodeDecodeError:
+                    logger.warning("[!] CArchive contains an invalid Python dynamic library name.")
+                    return
 
         try:
-            self.python_version = float(self.python_version) / 10
+            encoded_python_version = int(self.python_version)
+            version_base = 100 if encoded_python_version >= 100 else 10
+            major, minor = divmod(encoded_python_version, version_base)
+            if major <= 0:
+                raise ValueError
+            self.python_version = f"{major}.{minor}"
         except (TypeError, ValueError):
             logger.warning("[!] CArchive contains an invalid Python version.")
             return
@@ -233,15 +231,22 @@ class CArchive:
         if self.pyinstaller_version == 2.1:
             logger.debug(f"[*] CArchive Python Dynamic Library Name: {self.python_dynamic_lib}")
 
+        cookie_size = self.PYINST21_COOKIE_SIZE if self.pyinstaller_version == 2.1 else self.PYINST20_COOKIE_SIZE
+        package_end = self.magic_index + cookie_size
+        self.package_start = package_end - self.length_of_package
+        if self.package_start < 0 or self.package_start > self.magic_index:
+            logger.warning("[!] CArchive contains an invalid package length.")
+            return
         if self.toc_offset < 0 or self.toc_size < 0:
             logger.warning("[!] CArchive contains a negative TOC offset or size.")
             return
-        toc_end = self.toc_offset + self.toc_size
-        if self.toc_offset > len(self.archive_contents) or toc_end > len(self.archive_contents):
+        toc_start = self.package_start + self.toc_offset
+        toc_end = toc_start + self.toc_size
+        if toc_start < self.package_start or toc_start > self.magic_index or toc_end > self.magic_index:
             logger.warning("[!] CArchive TOC extends beyond the archive.")
             return
 
-        toc_bytes = memoryview(self.archive_contents)[self.toc_offset : self.toc_offset + self.toc_size]
+        toc_bytes = memoryview(self.archive_contents)[toc_start:toc_end]
         max_members = utils.get_extraction_budget(self.kwargs).max_members
         parsed_toc = []
         cursor = 0
@@ -273,21 +278,24 @@ class CArchive:
                 name = name.decode("utf-8").rstrip("\0")
             except (struct.error, UnicodeDecodeError):
                 logger.warning("[!] CArchive TOC contains a malformed entry.")
-                return
+                cursor += entry_size
+                continue
 
             entry_end = entry_offset + compressed_data_size
             if (
                 entry_offset < 0
                 or compressed_data_size < 0
                 or uncompressed_data_size < 0
-                or entry_offset > len(self.archive_contents)
-                or entry_end > len(self.archive_contents)
+                or entry_offset > self.toc_offset
+                or entry_end > self.toc_offset
             ):
                 logger.warning(f"[!] CArchive TOC entry {name!r} points outside the archive.")
-                return
+                cursor += entry_size
+                continue
             if compression_flag not in (0, 1):
                 logger.warning(f"[!] CArchive TOC entry {name!r} has an invalid compression flag.")
-                return
+                cursor += entry_size
+                continue
             if name == "":
                 name = str(uniquename())
                 logger.debug(f"[!] Warning: Found an unnamed file in CArchive. Using random name {name}")
@@ -310,11 +318,17 @@ class CArchive:
     def extract_files(self):
         extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         magic_nums: set = set()
-        for module_entry in self.toc:
+        try:
+            cookie_magic_num = bytecode.version_str_to_magic_num_int(getattr(self, "python_version", None))
+        except (KeyError, TypeError, ValueError):
+            cookie_magic_num = None
+        package_start = getattr(self, "package_start", 0)
+        for module_entry in self.toc[: extraction_budget.max_members]:
             if module_entry.type_code != self.ArchiveItem.PYMODULE:
                 continue
-            module_data = self.archive_contents[
-                module_entry.entry_offset : module_entry.entry_offset + module_entry.compressed_data_size
+            member_start = package_start + module_entry.entry_offset
+            module_data = memoryview(self.archive_contents)[
+                member_start : member_start + module_entry.compressed_data_size
             ]
             try:
                 if module_entry.compression_flag:
@@ -322,7 +336,9 @@ class CArchive:
                 else:
                     magic_bytes = module_data[:4]
                 if len(magic_bytes) == 4:
-                    magic_nums.add(magic2int(magic_bytes))
+                    magic_num = magic2int(magic_bytes)
+                    if not _is_marshaled_code(magic_bytes):
+                        magic_nums.add(magic_num)
             except (KeyError, TypeError, ValueError, zlib.error, struct.error):
                 continue
         nested_output_dirs: set = set()
@@ -341,7 +357,8 @@ class CArchive:
                 logger.warning(f"[!] Skipping unsafe CArchive entry {entry.name!r}: {error}.")
                 continue
 
-            data = self.archive_contents[entry.entry_offset : entry.entry_offset + entry.compressed_data_size]
+            member_start = package_start + entry.entry_offset
+            data = memoryview(self.archive_contents)[member_start : member_start + entry.compressed_data_size].tobytes()
 
             if entry.compression_flag:
                 try:
@@ -364,16 +381,12 @@ class CArchive:
                     logger.warning(f"[!] Skipping CArchive entry {entry.name!r}: {error}.")
                     continue
 
-            extraction_budget.commit_payload(entry.compressed_data_size, len(data))
-
             file_suffix = ""
-            if entry.type_code == self.ArchiveItem.PYSOURCE:
+            if entry.type_code in (self.ArchiveItem.PYSOURCE, self.ArchiveItem.PYMODULE):
                 if not data:
-                    logger.warning(f"[!] Skipping empty CArchive source entry {entry.name!r}.")
+                    logger.warning(f"[!] Skipping empty CArchive Python entry {entry.name!r}.")
                     continue
-                if ord(data[:1]) == ord(xdis.marsh.TYPE_CODE) or ord(data[:1]) == (
-                    ord(xdis.marsh.TYPE_CODE) | xdis.unmarshal.FLAG_REF
-                ):
+                if _is_marshaled_code(data):
                     file_suffix = ".pyc"
                     if len(magic_nums) > 1:
                         magic_num = next(iter(magic_nums))
@@ -381,32 +394,29 @@ class CArchive:
                             "[!] More than one magic number found within this CArchive. Using magic number"
                             f" {magic_num}, but also found numbers: {magic_nums}"
                         )
-                    elif len(magic_nums) == 0:
+                    elif len(magic_nums) == 0 and cookie_magic_num is None:
                         logger.warning(
-                            f"[!] Skipping CArchive source entry {entry.name!r} because no Python magic number "
+                            f"[!] Skipping CArchive Python entry {entry.name!r} because no Python magic number "
                             "has been found."
                         )
                         continue
                     try:
-                        data = bytecode.create_pyc_header(next(iter(magic_nums))) + data
+                        magic_num = next(iter(magic_nums)) if magic_nums else cookie_magic_num
+                        data = bytecode.create_pyc_header(magic_num) + data
                     except (KeyError, ValueError, struct.error) as error:
-                        logger.warning(f"[!] Skipping CArchive source entry {entry.name!r}: {error}.")
+                        logger.warning(f"[!] Skipping CArchive Python entry {entry.name!r}: {error}.")
                         continue
-                else:
+                elif entry.type_code == self.ArchiveItem.PYSOURCE:
                     file_suffix = ".py"
-                if "pyi" not in entry.name:
+                else:
+                    if len(data) < 4:
+                        logger.warning(f"[!] Skipping truncated CArchive module entry {entry.name!r}.")
+                        continue
+                    magic_num = magic2int(data[:4])
+                    magic_nums.add(magic_num)
+                    file_suffix = ".pyc"
+                if entry.type_code == self.ArchiveItem.PYSOURCE and "pyi" not in entry.name:
                     logger.info(f"[!] Potential entrypoint found at script {entry.name}.py")
-            elif entry.type_code == self.ArchiveItem.PYMODULE:
-                magic_bytes = data[:4]  # Python magic value
-                if len(magic_bytes) != 4:
-                    logger.warning(f"[!] Skipping truncated CArchive module entry {entry.name!r}.")
-                    continue
-                try:
-                    magic_nums.add(magic2int(magic_bytes))
-                except (KeyError, TypeError, ValueError, struct.error) as error:
-                    logger.warning(f"[!] Skipping CArchive module entry {entry.name!r}: {error}.")
-                    continue
-                file_suffix = ".pyc"
 
             if file_suffix:
                 try:
@@ -414,6 +424,12 @@ class CArchive:
                 except ValueError as error:
                     logger.warning(f"[!] Skipping unsafe CArchive entry {entry.name!r}: {error}.")
                     continue
+
+            try:
+                extraction_budget.commit_payload(entry.compressed_data_size, len(data))
+            except utils.ExtractionLimitError as error:
+                logger.warning(f"[!] Skipping CArchive entry {entry.name!r}: {error}.")
+                continue
 
             if entry.type_code != self.ArchiveItem.RUNTIME_OPTION:
                 try:
@@ -591,9 +607,12 @@ class ZlibArchive:
             except Exception as e:
                 logger.warning(f"[!] Could not disassemble file {key_file}. Received error: {e}")
             else:
-                self.compilation_time = datetime.fromtimestamp(crypto_key_compilation_timestamp)
+                try:
+                    self.compilation_time = datetime.fromtimestamp(crypto_key_compilation_timestamp)
+                except (OSError, OverflowError, TypeError, ValueError):
+                    pass
                 for const_string in crypto_key_co.co_consts:
-                    if const_string and len(const_string) == 16:
+                    if isinstance(const_string, str) and len(const_string) == 16:
                         self.potential_keys.append(const_string)
             # If we couldn't decompile the file to see the consts, lets just search the raw bytes of the file
             # for the password
@@ -617,6 +636,7 @@ class ZlibArchive:
 
     def parse_toc(self) -> None:
         self.toc = {}
+        extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         try:
             self.magic_int = magic2int(self.archive_contents[4:8])
             (toc_position,) = struct.unpack("!i", self.archive_contents[8:12])
@@ -625,6 +645,15 @@ class ZlibArchive:
             return
         if toc_position < 12 or toc_position >= len(self.archive_contents):
             logger.warning("[!] PYZ archive TOC position is outside the archive.")
+            return
+        max_toc_size = int(
+            getattr(self, "kwargs", {}).get(
+                "max_toc_size",
+                max(64 * 1024, extraction_budget.max_members * 256),
+            )
+        )
+        if len(self.archive_contents) - toc_position > max_toc_size:
+            logger.warning(f"[!] PYZ archive TOC exceeds the {max_toc_size} byte limit.")
             return
         try:
             parsed_toc = xdis.unmarshal.load_code(self.archive_contents[toc_position:], self.magic_int)
@@ -645,6 +674,9 @@ class ZlibArchive:
 
         validated_toc = {}
         for key, value in parsed_toc.items():
+            if len(validated_toc) >= extraction_budget.max_members:
+                logger.warning(f"[!] PYZ archive TOC exceeds the {extraction_budget.max_members} member limit.")
+                break
             if not isinstance(key, str) or not isinstance(value, (tuple, list)) or len(value) != 3:
                 logger.warning(f"[!] Skipping malformed PYZ TOC entry {key!r}.")
                 continue
@@ -674,8 +706,7 @@ class ZlibArchive:
         potential_keys = self.__dict__.get("potential_keys", [])
 
         if not self.encryption_key:
-            while potential_keys:
-                encryption_key = potential_keys.pop()
+            for encryption_key in potential_keys:
                 try:
                     cipher: AES.AESCipher = AES.new(encryption_key.encode(), AES.MODE_CFB, initialization_vector)
                     decrypted_data = cipher.decrypt(data[CRYPT_BLOCK_SIZE:])  # will silently fail if password is wrong

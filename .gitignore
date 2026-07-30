@@ -32,6 +32,9 @@ MANIFEST
 *.manifest
 *.spec
 
+# Local malware/compatibility corpus
+.corpus/
+
 # Installer logs
 pip-log.txt
 pip-delete-this-directory.txt

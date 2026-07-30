@@ -112,3 +112,33 @@ def test_overlay_preserves_payload_after_certificate_table(tmp_path) -> None:
     output_path = artifact.dump_overlay()
 
     assert output_path.read_bytes() == before + after
+
+
+def test_malformed_pe_resource_is_skipped(tmp_path) -> None:
+    """A malformed matching resource does not abort the PE parser."""
+    entry = SimpleNamespace(
+        name=SimpleNamespace(string=b"PYTHONSCRIPT"),
+        directory=SimpleNamespace(entries=[]),
+    )
+    artifact = PortableExecutable.__new__(PortableExecutable)
+    artifact.output_dir = tmp_path / "output"
+    artifact.kwargs = {}
+    artifact.pe = SimpleNamespace(DIRECTORY_ENTRY_RESOURCE=SimpleNamespace(entries=[entry]))
+
+    assert artifact.dump_resource("PYTHONSCRIPT") is None
+
+
+def test_invalid_pe_version_strings_are_ignored() -> None:
+    """Non-UTF-8 VERSIONINFO strings cannot abort processing."""
+    string_file_info = SimpleNamespace(
+        Key=b"StringFileInfo",
+        StringTable=[SimpleNamespace(entries={b"\xff": b"3.8"})],
+    )
+    artifact = PortableExecutable.__new__(PortableExecutable)
+    artifact.pe = SimpleNamespace(FileInfo=[[string_file_info]])
+    artifact.version_info = {}
+    artifact.python_version = ""
+
+    artifact.load_version_info()
+
+    assert artifact.version_info == {}

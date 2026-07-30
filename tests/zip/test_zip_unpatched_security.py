@@ -43,6 +43,15 @@ def _corrupt_first_member_crc(archive_bytes: bytes) -> bytes:
     return bytes(patched)
 
 
+def _mark_first_member_encrypted(archive_bytes: bytes) -> bytes:
+    patched = bytearray(archive_bytes)
+    local_header = patched.index(b"PK\x03\x04")
+    central_header = patched.index(b"PK\x01\x02")
+    struct.pack_into("<H", patched, local_header + 6, 1)
+    struct.pack_into("<H", patched, central_header + 8, 1)
+    return bytes(patched)
+
+
 def test_unsupported_zip_member_is_skipped_and_later_member_extracts(
     tmp_path,
     monkeypatch,
@@ -65,6 +74,22 @@ def test_zip_crc_error_is_skipped_and_later_member_extracts(
 ) -> None:
     """A corrupt early member cannot hide valid members that follow it."""
     archive_bytes = _corrupt_first_member_crc(_two_member_zip())
+    output_dir = tmp_path / "output"
+    monkeypatch.setattr("pydecipher.unpack", lambda *args, **kwargs: None)
+    artifact = ZipFile(io.BytesIO(archive_bytes), output_dir=output_dir)
+
+    artifact.unpack()
+
+    assert not (output_dir / "bad").exists()
+    assert (output_dir / "good").read_bytes() == b"good"
+
+
+def test_encrypted_zip_member_is_skipped_and_later_member_extracts(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """An encrypted member without a password is isolated to that member."""
+    archive_bytes = _mark_first_member_encrypted(_two_member_zip())
     output_dir = tmp_path / "output"
     monkeypatch.setattr("pydecipher.unpack", lambda *args, **kwargs: None)
     artifact = ZipFile(io.BytesIO(archive_bytes), output_dir=output_dir)

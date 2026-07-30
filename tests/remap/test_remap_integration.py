@@ -87,6 +87,8 @@ def test_remap(keep_output: bool, test_data: utils.RemapTestParameters) -> None:
         A test condition has failed.
     """
     test_file: pathlib.Path = utils.PYD_TEST_DATA_DIR.joinpath(test_data.test_file)
+    if not test_file.exists():
+        pytest.skip("compiled-bytecode fixture was intentionally removed")
     pydecipher.utils.check_read_access(test_file)
     assert utils.sha256_file(test_file) == test_data.file_sha256
     tmp_dir_name: str = "tmp_{}_{}".format(str(test_file.name).replace(".", ""), test_data.file_sha256[:10])

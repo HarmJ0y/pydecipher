@@ -165,6 +165,7 @@ class ZipFile:
                         except (
                             OSError,
                             ValueError,
+                            RuntimeError,
                             NotImplementedError,
                             zipfile.BadZipFile,
                             utils.ExtractionLimitError,

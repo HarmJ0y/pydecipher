@@ -130,8 +130,13 @@ class PortableExecutable(metaclass=abc.ABCMeta):
             except UnicodeDecodeError:
                 continue
             if current_resource_name == resource_name:
-                rva: int = entry.directory.entries[0].directory.entries[0].data.struct.OffsetToData
-                size: int = entry.directory.entries[0].directory.entries[0].data.struct.Size
+                try:
+                    data_entry = entry.directory.entries[0].directory.entries[0].data.struct
+                    rva: int = data_entry.OffsetToData
+                    size: int = data_entry.Size
+                except (AttributeError, IndexError, TypeError):
+                    logger.warning(f"[!] Skipping malformed PE resource {resource_name!r}.")
+                    continue
                 resource_data = self.pe.get_data(rva, size)
                 extraction_budget = utils.get_extraction_budget(self.kwargs)
                 try:
@@ -174,9 +179,13 @@ class PortableExecutable(metaclass=abc.ABCMeta):
                     string_table: pefile.Structure
                     for string_table in sub_structure.StringTable:
                         if string_table.entries:
-                            self.version_info = {
-                                x.decode("utf-8"): y.decode("utf-8") for x, y in string_table.entries.items()
-                            }
+                            decoded_entries = {}
+                            for key, value in string_table.entries.items():
+                                try:
+                                    decoded_entries[key.decode("utf-8")] = value.decode("utf-8")
+                                except (AttributeError, UnicodeDecodeError):
+                                    continue
+                            self.version_info = decoded_entries
         formatted_version_info: Dict[str, str] = json.dumps(self.version_info, indent=4, separators=(",", ": "))
         if not quiet:
             logger.debug(f"[*] This PE had the following VersionInfo resource: {formatted_version_info}")

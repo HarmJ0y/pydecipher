@@ -31,16 +31,12 @@ and the standard-bytecode collection utility.
 | Raw output `mkdir()` symlink traversal | `test_zip_does_not_create_output_through_symlinked_parent` | normal extraction/integration tests |
 | Standard-bytecode generator overwrite | `test_bytecode_producer_does_not_follow_destination_symlink` | `test_bytecode_producer_copies_to_new_destination` |
 
-## Pending-Patch Acceptance Tests
+## Post-Patch Re-Audit
 
-Strict expected-failure tests in
-`tests/pyinstaller/test_pyinstaller_unpatched_security.py` and
-`tests/pe/test_pe_unpatched_security.py`,
-`tests/zip/test_zip_unpatched_security.py`, and `tests/test_bytecode.py`
-confirm findings 003, 005, 009, 011, 015, 016, 021, 022, 023, 024, 025, 026,
-and 028. Each test asserts the desired remediated behavior; an unexpected pass
-intentionally fails the suite until the `xfail` marker is removed as part of
-the corresponding patch.
+The original pending findings were patched in isolated commits. A fresh audit
+found residual parser, budget, ordering, and atomic-publication issues. See
+`POST-PATCH-REAUDIT.md` for the current threat boundary and the happy/sad test
+matrix. Its strict acceptance tests describe the desired future remediation.
 
 ## Residual Risk
 

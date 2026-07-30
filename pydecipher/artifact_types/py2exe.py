@@ -104,11 +104,15 @@ class PYTHONSCRIPT:
             return False
 
         first_null = self.resource_contents[header_size:].find(b"\00")
-        if first_null != -1:
-            self.marshalled_obj_start_idx = header_size + first_null + 1
-            self.archive_name = self.resource_contents[header_size : header_size + first_null]
-            if self.archive_name:
+        if first_null == -1:
+            return False
+        self.marshalled_obj_start_idx = header_size + first_null + 1
+        self.archive_name = self.resource_contents[header_size : header_size + first_null]
+        if self.archive_name:
+            try:
                 self.archive_name = self.archive_name.decode()
+            except UnicodeDecodeError:
+                return False
 
         return True
 
@@ -194,6 +198,7 @@ class PYTHONSCRIPT:
 
     def disassemble_and_dump(self, brute_force: bool = False):
         code_bytes = self.resource_contents[self.marshalled_obj_start_idx :]
+        extraction_budget = utils.get_extraction_budget(getattr(self, "kwargs", {}))
         hijacked_stderr = io.StringIO()
         with redirect_stderr(hijacked_stderr):
             try:  # TODO make this more specific error catching
@@ -226,9 +231,12 @@ class PYTHONSCRIPT:
             try:
                 with tempfile.NamedTemporaryFile(suffix=".pyc") as temporary_file:
                     xdis.load.write_bytecode_file(temporary_file.name, co, self.magic_num)
+                    generated_size = os.fstat(temporary_file.fileno()).st_size
+                    extraction_budget.begin_member(generated_size, generated_size)
                     temporary_file.seek(0)
                     with utils.open_output_file(self.output_dir, member_name) as (bytecode_filepath, output_file):
                         shutil.copyfileobj(temporary_file, output_file)
+                    extraction_budget.commit_payload(generated_size, generated_size)
             except Exception as e:
                 logger.error(f"[!] Could not write file {member_name} with error: {e}")
             else:
@@ -245,7 +253,7 @@ class PYTHONSCRIPT:
             logger.info(f"[*] Archive name: {self.archive_name}")
 
         if self.magic_num == -1:
-            potential_magic_nums = self._determine_python_version()
+            potential_magic_nums = self._determine_python_version() or set()
             for magic_num in potential_magic_nums:
                 self.magic_num = magic_num
                 self.disassemble_and_dump()
@@ -254,7 +262,8 @@ class PYTHONSCRIPT:
 
         if self.magic_num == -1:
             # Brute force disassembly because we still don't know what version was used
-            all_magic_nums = [magic_num for magic_num, python_version in magicint2version.items()]
+            max_version_attempts = int(self.kwargs.get("max_version_attempts", 8))
+            all_magic_nums = sorted(magicint2version, reverse=True)[:max_version_attempts]
             for magic_num in all_magic_nums:
                 self.magic_num = magic_num
                 self.disassemble_and_dump(brute_force=True)

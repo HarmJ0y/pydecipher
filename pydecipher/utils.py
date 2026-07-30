@@ -162,6 +162,8 @@ def _safe_output_parts(member_name: str, suffix: str = "") -> List[str]:
             path_parts.append(part)
     if not path_parts:
         raise ValueError("member name does not identify a file")
+    if len(path_parts) > 64:
+        raise ValueError("member path exceeds 64 components")
     path_parts[-1] += suffix
     return path_parts
 
@@ -291,6 +293,8 @@ def open_output_file(output_dir: os.PathLike, member_name: str, suffix: str = ""
         temporary_fd = os.open(temporary_name, open_flags, 0o666, dir_fd=parent_fd)
         with os.fdopen(temporary_fd, mode) as output_file:
             temporary_fd = None
+            temporary_stat = os.fstat(output_file.fileno())
+            temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
             yield output_path, output_file
         os.link(
             temporary_name,
@@ -299,6 +303,13 @@ def open_output_file(output_dir: os.PathLike, member_name: str, suffix: str = ""
             dst_dir_fd=parent_fd,
             follow_symlinks=False,
         )
+        published_stat = os.stat(path_parts[-1], dir_fd=parent_fd, follow_symlinks=False)
+        if not stat.S_ISREG(published_stat.st_mode) or (
+            published_stat.st_dev,
+            published_stat.st_ino,
+        ) != temporary_identity:
+            os.unlink(path_parts[-1], dir_fd=parent_fd)
+            raise ValueError("temporary output identity changed before publication")
     except Exception:
         if temporary_fd is not None:
             os.close(temporary_fd)

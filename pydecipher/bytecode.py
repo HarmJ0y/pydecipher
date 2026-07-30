@@ -405,14 +405,16 @@ def diff_opcode(code_standard: CodeType, code_remapped: CodeType, version: str =
 
     def _recursively_extract_all_code_objects(co) -> List[bytes]:
         """Co is a code object, with potentially nested code objects."""
-        co_code_objects: List[bytes] = [co.co_code]
-        search_list: List[Union[Any]] = list(co.co_consts)
-        co_obj: Any
-        for co_obj in search_list:
-            if iscode(co_obj):
-                if co_obj not in co_code_objects:
-                    co_code_objects.append(co_obj.co_code)
-                    search_list.extend(co_obj.co_consts)
+        co_code_objects: List[bytes] = []
+        search_list: List[Union[Any]] = [co]
+        seen_objects = set()
+        while search_list:
+            co_obj = search_list.pop()
+            if not iscode(co_obj) or id(co_obj) in seen_objects:
+                continue
+            seen_objects.add(id(co_obj))
+            co_code_objects.append(co_obj.co_code)
+            search_list.extend(co_obj.co_consts)
         return co_code_objects
 
     def _build_opcode_index(co_code_objects, HAVE_ARGUMENT=90, version: str = None) -> List[int]:

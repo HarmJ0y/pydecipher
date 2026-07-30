@@ -167,7 +167,22 @@ def set_logging_options(**kwargs):
     here again because this is enforced by argparse in
     :func:`pydecipher.main._parse_args`.
     """
-    global log_path, log_identity, _log_file_handler
+    global log_path, log_identity, _log_file_handler, verbose_enabled, quiet_enabled
+    if "log_path" not in kwargs:
+        if _log_file_handler is not None:
+            logger.removeHandler(_log_file_handler)
+            _log_file_handler.close()
+            _log_file_handler = None
+        log_path = None
+        log_identity = None
+        verbose_enabled = False
+        quiet_enabled = False
+        if _stdout_console_handler not in logger.handlers:
+            logger.addHandler(_stdout_console_handler)
+        if _stderr_console_handler not in logger.handlers:
+            logger.addHandler(_stderr_console_handler)
+        _stdout_console_handler.setLevel(logging.INFO)
+        _stderr_console_handler.setLevel(logging.WARNING)
     if kwargs.get("verbose", []):
         _enable_verbose()
     if kwargs.get("quiet", []):

@@ -2,11 +2,16 @@
 """Acceptance tests for confirmed, not-yet-patched PyInstaller findings."""
 
 import io
+import importlib.util
+import marshal
 import struct
 import zlib
+from types import SimpleNamespace
 
 import pytest
 import xdis
+from Crypto.Cipher import AES
+from xdis.magics import by_magic
 
 import pydecipher
 from pydecipher import utils
@@ -83,24 +88,61 @@ def _carchive_bytes(member_count: int) -> bytes:
             )
         )
     toc = b"".join(entries)
-    cookie = struct.pack(
-        "!8siiii",
-        CArchive.MAGIC,
-        CArchive.PYINST20_COOKIE_SIZE + len(toc),
-        CArchive.PYINST20_COOKIE_SIZE,
-        len(toc),
-        36,
+    cookie = _carchive_cookie(CArchive.PYINST20_COOKIE_SIZE + len(toc), 0, len(toc), 36)
+    return toc + cookie
+
+
+def _carchive_cookie(package_size: int, toc_offset: int, toc_size: int, python_version: int = 38) -> bytes:
+    return CArchive.MAGIC + struct.pack("!iiii", package_size, toc_offset, toc_size, python_version)
+
+
+def _pack_toc_entry(offset: int, compressed: int, uncompressed: int, flag: int, kind: bytes, name: bytes) -> bytes:
+    entry_size = CArchive.CTOCEntry.ENTRYLEN + len(name)
+    return struct.pack(
+        f"!iiiiBB{len(name)}s",
+        entry_size,
+        offset,
+        compressed,
+        uncompressed,
+        flag,
+        ord(kind),
+        name,
     )
-    return cookie + toc
+
+
+@pytest.mark.parametrize("kind", [b"s", b"m"])
+def test_carchive_python311_raw_code_uses_cookie_magic(tmp_path, kind) -> None:
+    """Three-digit cookie versions recover modern raw CArchive Python entries."""
+    raw_code = bytes([ord(xdis.marsh.TYPE_CODE) | xdis.unmarshal.FLAG_REF]) + b"raw-marshaled-code"
+    name = b"entry"
+    toc = _pack_toc_entry(0, len(raw_code), len(raw_code), 0, kind, name)
+    cookie_size = CArchive.PYINST21_COOKIE_SIZE
+    cookie = CArchive.MAGIC + struct.pack(
+        "!iiii64s",
+        len(raw_code) + len(toc) + cookie_size,
+        len(raw_code),
+        len(toc),
+        311,
+        b"python311.dll",
+    )
+    output_dir = tmp_path / "output"
+
+    archive = CArchive(io.BytesIO(raw_code + toc + cookie), output_dir=output_dir)
+    archive.unpack()
+
+    assert archive.python_version == "3.11"
+    extracted = (output_dir / "entry.pyc").read_bytes()
+    assert extracted[:4] == xdis.magics.by_version["3.11"]
+    assert extracted[16:] == raw_code
 
 
 def test_carchive_toc_parsing_copies_only_linear_data() -> None:
     """Parsing many small TOC entries does not repeatedly copy the suffix."""
     archive = CArchive.__new__(CArchive)
     archive.pyinstaller_version = 2.0
-    archive.magic_index = 0
     archive.kwargs = {}
     archive.archive_contents = _SliceTrackingBytes(_carchive_bytes(256))
+    archive.magic_index = len(archive.archive_contents) - CArchive.PYINST20_COOKIE_SIZE
     _SliceTrackingBytes.copied_bytes = 0
 
     archive.parse_toc()
@@ -113,9 +155,9 @@ def test_carchive_toc_respects_member_limit_during_parsing() -> None:
     """TOC materialization stops at the configured archive member limit."""
     archive = CArchive.__new__(CArchive)
     archive.pyinstaller_version = 2.0
-    archive.magic_index = 0
     archive.kwargs = {"max_members": 2}
     archive.archive_contents = _carchive_bytes(8)
+    archive.magic_index = len(archive.archive_contents) - CArchive.PYINST20_COOKIE_SIZE
 
     archive.parse_toc()
 
@@ -257,3 +299,160 @@ def test_carchive_source_before_module_is_extracted(tmp_path, monkeypatch) -> No
     archive.extract_files()
 
     assert (archive.output_dir / "entry.pyc").read_bytes() == b"H" + source
+
+
+def test_pyz_toc_respects_member_limit_during_parsing(monkeypatch) -> None:
+    """A marshalled PYZ TOC is bounded before its entries are retained."""
+    archive = ZlibArchive.__new__(ZlibArchive)
+    archive.archive_contents = b"PYZ\0" + next(iter(by_magic)) + struct.pack("!i", 12) + b"toc"
+    archive.kwargs = {"max_members": 2}
+    monkeypatch.setattr(
+        xdis.unmarshal,
+        "load_code",
+        lambda *args, **kwargs: {
+            f"module_{index}": (ZlibArchive.ArchiveItem.MODULE.value, 12, 0)
+            for index in range(256)
+        },
+    )
+
+    archive.parse_toc()
+
+    assert len(archive.toc) <= 2
+
+
+def test_carchive_magic_prescan_does_not_copy_every_member_payload(tmp_path) -> None:
+    """Order-independent source recovery does not copy overlapping module payloads."""
+    payload = b"M" * 4096
+    _SliceTrackingBytes.copied_bytes = 0
+    archive = CArchive.__new__(CArchive)
+    archive.archive_contents = _SliceTrackingBytes(payload)
+    archive.output_dir = tmp_path / "output"
+    archive.kwargs = {"max_members": 1}
+    archive.toc = [
+        CArchive.CTOCEntry(0, len(payload), len(payload), False, CArchive.ArchiveItem.PYMODULE.value, f"m{i}")
+        for i in range(64)
+    ]
+
+    archive.extract_files()
+
+    assert _SliceTrackingBytes.copied_bytes <= len(payload) * 4
+
+
+def test_pyc_detector_rejects_non_pyc_with_recognized_header(tmp_path) -> None:
+    """A known magic and marker do not mask a valid archive without marshal validation."""
+    prefix = importlib.util.MAGIC_NUMBER + b"\0" * 12 + marshal.dumps((lambda: None).__code__)
+    cookie = _carchive_cookie(len(prefix) + CArchive.PYINST20_COOKIE_SIZE, 0, 0)
+    payload = prefix + cookie
+    assert CArchive(io.BytesIO(payload), output_dir=tmp_path / "carchive")
+
+    with pytest.raises(TypeError):
+        Pyc(io.BytesIO(payload), output_dir=tmp_path / "pyc")
+
+
+def test_carchive_budget_accounts_for_generated_header(tmp_path, monkeypatch) -> None:
+    """CArchive source reconstruction charges the exact bytes written."""
+    source = xdis.marsh.TYPE_CODE.encode() + b"\0" * 7
+    module = b"MAGC"
+    archive = CArchive.__new__(CArchive)
+    archive.archive_contents = source + module
+    archive.output_dir = tmp_path / "output"
+    archive.kwargs = {"max_member_size": len(source), "max_total_size": 1024}
+    archive.toc = [
+        CArchive.CTOCEntry(0, len(source), len(source), False, CArchive.ArchiveItem.PYSOURCE.value, "entry"),
+        CArchive.CTOCEntry(
+            len(source), len(module), len(module), False, CArchive.ArchiveItem.PYMODULE.value, "module"
+        ),
+    ]
+    monkeypatch.setattr("pydecipher.artifact_types.pyinstaller.magic2int", lambda data: 123)
+    monkeypatch.setattr(pydecipher.bytecode, "create_pyc_header", lambda *args, **kwargs: b"H" * 16)
+
+    archive.extract_files()
+
+    assert not (archive.output_dir / "entry.pyc").exists()
+
+
+def test_carchive_uses_cookie_package_start(tmp_path) -> None:
+    """Leading overlay bytes do not shift package-relative TOC and member offsets."""
+    member = b"data"
+    toc = _pack_toc_entry(0, len(member), len(member), 0, b"x", b"good")
+    package_size = len(member) + len(toc) + CArchive.PYINST20_COOKIE_SIZE
+    payload = b"overlay-prefix" + member + toc + _carchive_cookie(package_size, len(member), len(toc))
+    archive = CArchive(io.BytesIO(payload), output_dir=tmp_path / "output")
+
+    archive.parse_toc()
+    archive.extract_files()
+
+    assert (archive.output_dir / "good").read_bytes() == member
+
+
+def test_carchive_selects_final_valid_cookie(tmp_path) -> None:
+    """A magic marker in package data cannot hide the valid final cookie."""
+    member = b"X" + CArchive.MAGIC + b"A" * 128
+    cookie = _carchive_cookie(len(member) + CArchive.PYINST20_COOKIE_SIZE, len(member), 0)
+
+    archive = CArchive(io.BytesIO(member + cookie), output_dir=tmp_path / "output")
+
+    assert archive.magic_index == len(member)
+
+
+def test_pyz_key_discovery_ignores_non_string_constants(tmp_path, monkeypatch) -> None:
+    """A valid key sidecar with unrelated constants cannot abort PYZ handling."""
+    key_file = tmp_path / "pyimod00_crypto_key.pyc"
+    key_file.write_bytes(b"sidecar")
+    monkeypatch.setattr(
+        "pydecipher.artifact_types.pyinstaller.disassemble_file",
+        lambda *args, **kwargs: ("key.py", SimpleNamespace(co_consts=(123, None)), "3.8", 1, 0, False, 0, None),
+    )
+    archive = ZlibArchive.__new__(ZlibArchive)
+    archive.archive_path = tmp_path / "archive.pyz"
+    archive.encrypted = False
+    archive.kwargs = {}
+
+    archive.check_for_password_file()
+
+    assert archive.potential_keys == []
+
+
+def test_corrupt_pyz_member_does_not_discard_key_for_later_members(tmp_path, monkeypatch) -> None:
+    """A malformed early member cannot suppress later encrypted modules."""
+    key = "K" * 16
+    iv = b"I" * 16
+
+    def encrypt(payload: bytes) -> bytes:
+        return iv + AES.new(key.encode(), AES.MODE_CFB, iv).encrypt(zlib.compress(payload))
+
+    malformed = encrypt(b"B" * 128)
+    valid = encrypt(b"good")
+    archive = ZlibArchive.__new__(ZlibArchive)
+    archive.archive_contents = malformed + valid
+    archive.output_dir = tmp_path / "output"
+    archive.magic_int = 0
+    archive.encrypted = False
+    archive.encryption_key = ""
+    archive.potential_keys = [key]
+    archive.kwargs = {"max_member_size": 64}
+    archive.toc = {
+        "malformed": (ZlibArchive.ArchiveItem.MODULE.value, 0, len(malformed)),
+        "valid": (ZlibArchive.ArchiveItem.MODULE.value, len(malformed), len(valid)),
+    }
+    monkeypatch.setattr(pydecipher.bytecode, "create_pyc_header", lambda *args, **kwargs: b"")
+
+    archive.extract_files()
+
+    assert (archive.output_dir / "valid.pyc").read_bytes() == b"good"
+
+
+def test_carchive_skips_malformed_name_and_parses_later_entry() -> None:
+    """An invalid UTF-8 entry name does not suppress subsequent TOC records."""
+    invalid = _pack_toc_entry(0, 0, 0, 0, b"x", b"\xff")
+    valid = _pack_toc_entry(0, 0, 0, 0, b"x", b"good")
+    toc = invalid + valid
+    archive = CArchive.__new__(CArchive)
+    archive.archive_contents = toc + _carchive_cookie(CArchive.PYINST20_COOKIE_SIZE + len(toc), 0, len(toc))
+    archive.magic_index = len(toc)
+    archive.pyinstaller_version = 2.0
+    archive.kwargs = {}
+
+    archive.parse_toc()
+
+    assert [entry.name for entry in archive.toc] == ["good"]
