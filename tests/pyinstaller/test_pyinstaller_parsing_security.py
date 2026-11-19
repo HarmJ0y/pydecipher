@@ -342,6 +342,13 @@ def test_pyc_detector_rejects_non_pyc_with_recognized_header(tmp_path) -> None:
         Pyc(io.BytesIO(payload), output_dir=tmp_path / "pyc")
 
 
+def test_pyc_detector_accepts_genuine_pyc_with_header(tmp_path) -> None:
+    """A real header-bearing PYC passes marshal validation and is detected."""
+    payload = importlib.util.MAGIC_NUMBER + b"\0" * 12 + marshal.dumps(compile("x = 1", "sample", "exec"))
+
+    assert Pyc(io.BytesIO(payload), output_dir=tmp_path / "pyc")
+
+
 def test_carchive_budget_accounts_for_generated_header(tmp_path, monkeypatch) -> None:
     """CArchive source reconstruction charges the exact bytes written."""
     source = xdis.marsh.TYPE_CODE.encode() + b"\0" * 7

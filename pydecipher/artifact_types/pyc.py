@@ -20,6 +20,7 @@ from typing import Any, BinaryIO, List, Union
 
 from xdis import iscode
 from xdis.magics import by_magic, magic2int
+from xdis.unmarshal import _VersionIndependentUnmarshaller
 
 import pydecipher
 from pydecipher import bytecode, logger, utils
@@ -143,7 +144,7 @@ class Pyc:
                 continue
             try:
                 marshalled_data = io.BytesIO(self.file_contents[offset:])
-                unmarshaller = xdis.unmarshal._VersionIndependentUnmarshaller(
+                unmarshaller = _VersionIndependentUnmarshaller(
                     marshalled_data,
                     magic2int(self.file_contents[:4]),
                     False,
