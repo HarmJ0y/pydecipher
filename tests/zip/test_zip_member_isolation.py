@@ -1,20 +1,11 @@
 # -*- coding: utf-8 -*-
-"""Acceptance tests for confirmed, not-yet-patched ZIP findings."""
+"""Regression tests isolating malformed ZIP members from later members."""
 
 import io
 import struct
 import zipfile
 
-import pytest
-
 from pydecipher.artifact_types.zip import ZipFile
-
-
-def _known_vulnerability(finding: str):
-    return pytest.mark.xfail(
-        strict=True,
-        reason=f"{finding} is confirmed and awaiting remediation",
-    )
 
 
 def _two_member_zip() -> bytes:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Acceptance tests for confirmed file-backed findings awaiting remediation."""
+"""Regression tests for hostile-input resource, budget, and output handling."""
 
 import io
 import os
@@ -12,13 +12,6 @@ import pytest
 import pydecipher
 from pydecipher import bytecode, utils
 from pydecipher.artifact_types.py2exe import PYTHONSCRIPT
-
-
-def _known_vulnerability(finding: str):
-    return pytest.mark.xfail(
-        strict=True,
-        reason=f"{finding} is confirmed and awaiting remediation",
-    )
 
 
 def test_code_object_traversal_processes_each_object_once(monkeypatch) -> None:

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Acceptance tests for confirmed, not-yet-patched PyInstaller findings."""
+"""Regression tests for hostile CArchive and PYZ parsing and extraction."""
 
 import io
 import importlib.util
@@ -20,13 +20,6 @@ from pydecipher.artifact_types.pyc import Pyc
 from pydecipher.artifact_types.pyinstaller import CArchive
 from pydecipher.artifact_types.pyinstaller import ZlibArchive
 from pydecipher.artifact_types.zip import ZipFile
-
-
-def _known_vulnerability(finding: str):
-    return pytest.mark.xfail(
-        strict=True,
-        reason=f"{finding} is confirmed and awaiting remediation",
-    )
 
 
 class _TrackingBytesIO(io.BytesIO):

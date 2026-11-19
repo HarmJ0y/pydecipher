@@ -1,19 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Acceptance tests for confirmed, not-yet-patched PE findings."""
+"""Regression tests for hostile PE certificate, overlay, and resource parsing."""
 
 import struct
 from types import SimpleNamespace
 
-import pytest
-
 from pydecipher.artifact_types.pe import PortableExecutable
-
-
-def _known_vulnerability(finding: str):
-    return pytest.mark.xfail(
-        strict=True,
-        reason=f"{finding} is confirmed and awaiting remediation",
-    )
 
 
 def _security_directory(offset: int, size: int):
