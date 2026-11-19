@@ -273,69 +273,75 @@ def run(args_in: List[str] = None) -> None:
     log_stream__handler.setLevel(logging.DEBUG)
     logger.addHandler(log_stream__handler)
 
-    version_hint: str = args.version_hint
+    try:
+        version_hint: str = args.version_hint
 
-    alternate_opmap: Dict[str, int] = None
-    if args.remapping_file:
-        remap_file: pathlib.Path = pathlib.Path(args.remapping_file).resolve()
-        logger.info(f"[*] Using remap file {remap_file}")
-        utils.check_read_access(remap_file)
-        alternate_opmap: Dict[str, int] = bytecode.create_opmap_from_file(remap_file)
+        alternate_opmap: Dict[str, int] = None
+        if args.remapping_file:
+            remap_file: pathlib.Path = pathlib.Path(args.remapping_file).resolve()
+            logger.info(f"[*] Using remap file {remap_file}")
+            utils.check_read_access(remap_file)
+            alternate_opmap: Dict[str, int] = bytecode.create_opmap_from_file(remap_file)
 
-        with remap_file.open("r") as remapping_file:
-            file_json: str = json.loads(remapping_file.read())
-            remap_file_version: str = file_json["python_version"]
-            version_hint = remap_file_version
+            with remap_file.open("r") as remapping_file:
+                file_json: str = json.loads(remapping_file.read())
+                remap_file_version: str = file_json["python_version"]
+                version_hint = remap_file_version
 
-    utils.check_write_access(output_dir)
-    # Dump all pyc files
-    if artifact_path.is_dir():
-        kwargs: Dict[str, str] = {"version_hint": version_hint}
-        dirpath: str
-        dirnames: List[str]
-        filenames: List[str]
-        for (dirpath, dirnames, filenames) in os.walk(artifact_path):
-            dirnames[:] = [
-                dirname
-                for dirname in dirnames
-                if not pathlib.Path(dirpath).joinpath(dirname).is_symlink()
-            ]
-            filename: str
-            for filename in filenames:
-                if os.path.splitext(filename)[1].lower() in (".pyc", ".pyo"):
-                    full_path: pathlib.Path = pathlib.Path(dirpath).joinpath(filename)
-                    if full_path.is_symlink():
-                        continue
-                    try:
-                        pyc_class_obj: artifact_types.pyc.Pyc = artifact_types.pyc.Pyc(
-                            full_path, output_dir=full_path.parent, **kwargs
-                        )
-                    except TypeError:
-                        pass
-                    else:
-                        pyc_class_obj.unpack()
-        pyc_files = _find_pyc_files(artifact_path)
-    else:
-        unpack(artifact_path, output_dir=str(output_dir), version_hint=version_hint)
+        utils.check_write_access(output_dir)
+        # Dump all pyc files
+        if artifact_path.is_dir():
+            kwargs: Dict[str, str] = {"version_hint": version_hint}
+            dirpath: str
+            dirnames: List[str]
+            filenames: List[str]
+            for (dirpath, dirnames, filenames) in os.walk(artifact_path):
+                dirnames[:] = [
+                    dirname
+                    for dirname in dirnames
+                    if not pathlib.Path(dirpath).joinpath(dirname).is_symlink()
+                ]
+                filename: str
+                for filename in filenames:
+                    if os.path.splitext(filename)[1].lower() in (".pyc", ".pyo"):
+                        full_path: pathlib.Path = pathlib.Path(dirpath).joinpath(filename)
+                        if full_path.is_symlink():
+                            continue
+                        try:
+                            pyc_class_obj: artifact_types.pyc.Pyc = artifact_types.pyc.Pyc(
+                                full_path, output_dir=full_path.parent, **kwargs
+                            )
+                        except TypeError:
+                            pass
+                        else:
+                            pyc_class_obj.unpack()
+            pyc_files = _find_pyc_files(artifact_path)
+        else:
+            unpack(artifact_path, output_dir=str(output_dir), version_hint=version_hint)
 
-    # If we produced files, we want to also include the logged output of
-    # pydecipher. If we didn't produce anything, we can assume the program
-    # failed/had uninteresting output that doesn't need to be kept. The one
-    # exception to this is when we pass in a single pyc file, or a directory of
-    # pyc files, to be decompiled.
-    if (output_dir.exists() and os.listdir(output_dir)) or pyc_files:
-        utils.make_output_directory(output_dir.parent, output_dir.name)
-        log_name: str = datetime.datetime.now().strftime("log_%H_%M_%S_%b_%d_%Y.txt")
-        log_path = _write_log_file(output_dir, log_name, log_stream.getvalue())
-        log_stat = log_path.stat(follow_symlinks=False)
-        logging_options = {
-            "log_path": log_path,
-            "log_identity": (log_stat.st_dev, log_stat.st_ino),
-        }
-        pydecipher.set_logging_options(**logging_options)
-    else:
-        logger.warning("[!] This artifact produced no additional output.")
-        return
+        # If we produced files, we want to also include the logged output of
+        # pydecipher. If we didn't produce anything, we can assume the program
+        # failed/had uninteresting output that doesn't need to be kept. The one
+        # exception to this is when we pass in a single pyc file, or a directory of
+        # pyc files, to be decompiled.
+        if (output_dir.exists() and os.listdir(output_dir)) or pyc_files:
+            utils.make_output_directory(output_dir.parent, output_dir.name)
+            log_name: str = datetime.datetime.now().strftime("log_%H_%M_%S_%b_%d_%Y.txt")
+            log_path = _write_log_file(output_dir, log_name, log_stream.getvalue())
+            log_stat = log_path.stat(follow_symlinks=False)
+            logging_options = {
+                "log_path": log_path,
+                "log_identity": (log_stat.st_dev, log_stat.st_ino),
+            }
+            pydecipher.set_logging_options(**logging_options)
+        else:
+            logger.warning("[!] This artifact produced no additional output.")
+            return
+    finally:
+        # The in-memory buffer only seeds the log file; detach it so later
+        # runs in the same process do not keep writing into it.
+        logger.removeHandler(log_stream__handler)
+        log_stream__handler.close()
 
     # Determine which pyc files to decompile
     if not pyc_files:
